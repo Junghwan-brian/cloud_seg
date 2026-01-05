@@ -839,10 +839,11 @@ class VimSeg(nn.Module):
         depth = config['depth']
 
         # Create encoder
+        # rms_norm=True: pretrained weights가 RMSNorm으로 훈련됨
         self.encoder = VisionMambaEncoder(
             img_size=img_size, in_channels=in_channels,
             embed_dim=embed_dim, depth=depth,
-            return_intermediate=True, **kwargs)
+            rms_norm=True, return_intermediate=True, **kwargs)
 
         # Create decoder
         if decoder_type == 'unet':

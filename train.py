@@ -319,6 +319,11 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device,
                     if aux_out is not None:
                         loss += aux_weight * criterion(aux_out, targets)
                     pred = main_out.argmax(1)
+                elif isinstance(outputs, dict):
+                    # VimSeg 등 dict 반환 모델 처리
+                    main_out = outputs['out']
+                    loss = criterion(main_out, targets)
+                    pred = main_out.argmax(1)
                 else:
                     loss = criterion(outputs, targets)
                     pred = outputs.argmax(1)
@@ -334,6 +339,11 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device,
                 loss = criterion(main_out, targets)
                 if aux_out is not None:
                     loss += aux_weight * criterion(aux_out, targets)
+                pred = main_out.argmax(1)
+            elif isinstance(outputs, dict):
+                # VimSeg 등 dict 반환 모델 처리
+                main_out = outputs['out']
+                loss = criterion(main_out, targets)
                 pred = main_out.argmax(1)
             else:
                 loss = criterion(outputs, targets)
@@ -385,6 +395,8 @@ def validate(model, val_loader, criterion, device, num_classes=4, ignore_index=N
 
         if isinstance(outputs, tuple):
             outputs = outputs[0]
+        elif isinstance(outputs, dict):
+            outputs = outputs['out']
 
         loss = criterion(outputs, targets)
         pred = outputs.argmax(1)
