@@ -50,6 +50,7 @@ class _AsppPooling(nn.Module):
 
 class _CARM(nn.Module):
     """Channel Attention Refinement Module"""
+
     def __init__(self, in_planes, ratio=8):
         super(_CARM, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
@@ -82,6 +83,7 @@ class _CARM(nn.Module):
 
 class FSFB_CH(nn.Module):
     """Feature Selection Fusion Block - Channel"""
+
     def __init__(self, in_planes, num, ratio=8):
         super(FSFB_CH, self).__init__()
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
@@ -124,6 +126,7 @@ class FSFB_CH(nn.Module):
 
 class FSFB_SP(nn.Module):
     """Feature Selection Fusion Block - Spatial"""
+
     def __init__(self, num, norm_layer=nn.BatchNorm2d):
         super(FSFB_SP, self).__init__()
         self.conv = nn.Sequential(
@@ -155,16 +158,18 @@ class FSFB_SP(nn.Module):
 
 class _HFFM(nn.Module):
     """Hierarchical Feature Fusion Module"""
+
     def __init__(self, in_channels, atrous_rates, norm_layer=nn.BatchNorm2d):
         super(_HFFM, self).__init__()
         out_channels = 256
-        
+
         rate1, rate2, rate3 = tuple(atrous_rates)
         self.b1 = _ASPPConv(in_channels, out_channels, rate1, norm_layer)
         self.b2 = _ASPPConv(in_channels, out_channels, rate2, norm_layer)
         self.b3 = _ASPPConv(in_channels, out_channels, rate3, norm_layer)
-        self.b4 = _AsppPooling(in_channels, out_channels, norm_layer=norm_layer)
-        
+        self.b4 = _AsppPooling(in_channels, out_channels,
+                               norm_layer=norm_layer)
+
         self.carm = _CARM(in_channels)
         self.sa = FSFB_SP(4, norm_layer)
         self.ca = FSFB_CH(out_channels, 4, 8)
@@ -176,13 +181,13 @@ class _HFFM(nn.Module):
         feat3 = self.b3(x)
         feat4 = self.b4(x)
         feat = feat1 + feat2 + feat3 + feat4
-        
+
         spatial_atten = self.sa(feat, num)
         channel_atten = self.ca(feat, num)
 
-        feat_ca = (channel_atten[0] * feat1 + channel_atten[1] * feat2 + 
+        feat_ca = (channel_atten[0] * feat1 + channel_atten[1] * feat2 +
                    channel_atten[2] * feat3 + channel_atten[3] * feat4)
-        feat_sa = (spatial_atten[0] * feat1 + spatial_atten[1] * feat2 + 
+        feat_sa = (spatial_atten[0] * feat1 + spatial_atten[1] * feat2 +
                    spatial_atten[2] * feat3 + spatial_atten[3] * feat4)
         feat_sa = feat_sa + feat_ca
 
@@ -191,6 +196,7 @@ class _HFFM(nn.Module):
 
 class _AFFM(nn.Module):
     """Adaptive Feature Fusion Module"""
+
     def __init__(self, in_channels=256, norm_layer=nn.BatchNorm2d):
         super(_AFFM, self).__init__()
         self.sa = FSFB_SP(2, norm_layer)
@@ -213,7 +219,8 @@ class block_Conv3x3(nn.Module):
     def __init__(self, in_channels, out_channels=256):
         super(block_Conv3x3, self).__init__()
         self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3,
+                      stride=1, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(True)
         )
@@ -225,37 +232,39 @@ class block_Conv3x3(nn.Module):
 class CDnetV2(nn.Module):
     """
     CDNetV2 with Pretrained ResNet50 Backbone
-    
+
     Args:
         in_channels: 입력 채널 수
         num_classes: 출력 클래스 수
         pretrained: ImageNet pretrained 백본 사용 여부
         aux: Auxiliary loss 사용 여부
     """
-    
+
     def __init__(self, in_channels=3, num_classes=21, pretrained=True, aux=True):
         super(CDnetV2, self).__init__()
-        
+
         self.in_channels = in_channels
         self.num_classes = num_classes
         self.aux = aux
-        
+
         # Load pretrained ResNet50 backbone
         backbone = resnet.resnet50(
             pretrained=pretrained,
             replace_stride_with_dilation=[False, True, True]
         )
-        
+
         # Input adaptation for non-3-channel inputs
         if in_channels != 3:
             self.input_conv = nn.Sequential(
-                nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False),
+                nn.Conv2d(in_channels, 64, kernel_size=7,
+                          stride=2, padding=3, bias=False),
                 nn.BatchNorm2d(64),
                 nn.ReLU(inplace=True)
             )
             if pretrained:
                 pretrained_weight = backbone.conv1.weight.data
-                new_weight = pretrained_weight.mean(dim=1, keepdim=True).repeat(1, in_channels, 1, 1)
+                new_weight = pretrained_weight.mean(
+                    dim=1, keepdim=True).repeat(1, in_channels, 1, 1)
                 self.input_conv[0].weight.data = new_weight
         else:
             self.input_conv = nn.Sequential(
@@ -263,42 +272,43 @@ class CDnetV2(nn.Module):
                 backbone.bn1,
                 backbone.relu
             )
-        
+
         self.maxpool = backbone.maxpool
-        
+
         # Use layer1 for low-level features
         self.layer1 = backbone.layer1  # 256 channels, 1/4
         self.layer2 = backbone.layer2  # 512 channels, 1/8 or 1/4 with dilation
         self.layer3 = backbone.layer3  # 1024 channels
         self.layer4 = backbone.layer4  # 2048 channels
-        
+
         # Feature adaptation layers
         self.con_layer1 = block_Conv3x3(256, 256)
         self.con_res2 = block_Conv3x3(256, 256)
         self.con_res3 = block_Conv3x3(512, 256)
         self.con_res4 = block_Conv3x3(1024, 256)
         self.con_res5 = block_Conv3x3(2048, 256)
-        
+
         # HFFM and AFFM modules
         self.hffm = _HFFM(2048, [6, 12, 18])
         self.affm_1 = _AFFM()
         self.affm_2 = _AFFM()
         self.affm_3 = _AFFM()
         self.affm_4 = _AFFM()
-        
+
         # Output layers
         self.dsn1 = nn.Conv2d(256, num_classes, kernel_size=1)
         self.dsn2 = nn.Conv2d(256, num_classes, kernel_size=1)
-        
+
         self._init_weights()
-    
+
     def _init_weights(self):
         for m in [self.con_layer1, self.con_res2, self.con_res3, self.con_res4, self.con_res5,
                   self.hffm, self.affm_1, self.affm_2, self.affm_3, self.affm_4,
                   self.dsn1, self.dsn2]:
             for layer in m.modules():
                 if isinstance(layer, nn.Conv2d):
-                    nn.init.kaiming_normal_(layer.weight, mode='fan_out', nonlinearity='relu')
+                    nn.init.kaiming_normal_(
+                        layer.weight, mode='fan_out', nonlinearity='relu')
                     if layer.bias is not None:
                         nn.init.zeros_(layer.bias)
                 elif isinstance(layer, nn.BatchNorm2d):
@@ -307,73 +317,79 @@ class CDnetV2(nn.Module):
 
     def forward(self, x):
         input_size = x.size()[2:]
-        
+
         # Encoder - Initial convolution
         x = self.input_conv(x)  # 1/2
         x = self.maxpool(x)     # 1/4
-        
+
         # Layer 1 features
         layer1_feat = self.layer1(x)  # 256 channels, 1/4
         layer1_0 = self.con_layer1(layer1_feat)
         size_layer1_0 = layer1_0.size()[2:]
-        
-        # Layer 2 features  
+
+        # Layer 2 features
         layer2_feat = self.layer2(layer1_feat)  # 512 channels
         res2 = self.con_res2(layer1_feat)  # From layer1 for skip connection
         res3 = self.con_res3(layer2_feat)
         size_res2 = res2.size()[2:]
-        
+
         # Layer 3 and 4 features
         layer3_feat = self.layer3(layer2_feat)  # 1024 channels
         res4 = self.con_res4(layer3_feat)
-        
+
         layer4_feat = self.layer4(layer3_feat)  # 2048 channels
         res5 = self.con_res5(layer4_feat)
-        
+
         # HFFM
         hffm = self.hffm(layer4_feat, 4)
         res5 = res5 + hffm
         aux_feature = res5
-        
+
         # AFFM cascade
         res5, _, _ = self.affm_1(res4, res5, hffm, 2)
         res5, _, _ = self.affm_2(res3, res5, hffm, 2)
-        
-        res5 = F.interpolate(res5, size_res2, mode='bilinear', align_corners=True)
+
+        res5 = F.interpolate(
+            res5, size_res2, mode='bilinear', align_corners=True)
         res5, _, _ = self.affm_3(
-            res2, res5, 
-            F.interpolate(hffm, size_res2, mode='bilinear', align_corners=True), 
+            res2, res5,
+            F.interpolate(hffm, size_res2, mode='bilinear',
+                          align_corners=True),
             2
         )
-        
-        res5 = F.interpolate(res5, size_layer1_0, mode='bilinear', align_corners=True)
+
+        res5 = F.interpolate(res5, size_layer1_0,
+                             mode='bilinear', align_corners=True)
         res5, _, _ = self.affm_4(
             layer1_0, res5,
-            F.interpolate(hffm, size_layer1_0, mode='bilinear', align_corners=True),
+            F.interpolate(hffm, size_layer1_0,
+                          mode='bilinear', align_corners=True),
             2
         )
-        
+
         # Output
         output = self.dsn1(res5)
-        output = F.interpolate(output, input_size, mode='bilinear', align_corners=True)
-        
+        output = F.interpolate(
+            output, input_size, mode='bilinear', align_corners=True)
+
         if self.training and self.aux:
             auxout = self.dsn2(aux_feature)
-            auxout = F.interpolate(auxout, input_size, mode='bilinear', align_corners=True)
+            auxout = F.interpolate(
+                auxout, input_size, mode='bilinear', align_corners=True)
             return output, auxout
-        
+
         return output
 
 
 def cdnetv2(in_channels=3, num_classes=21, pretrained=True, aux=True):
     """
     CDNetV2 with pretrained ResNet50 backbone
-    
+
     Args:
         in_channels: 입력 채널 수
         num_classes: 출력 클래스 수
         pretrained: ImageNet pretrained 사용 여부
         aux: Auxiliary loss 사용 여부
     """
-    return CDnetV2(in_channels=in_channels, num_classes=num_classes, 
+    return CDnetV2(in_channels=in_channels, num_classes=num_classes,
                    pretrained=pretrained, aux=aux)

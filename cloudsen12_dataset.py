@@ -217,6 +217,12 @@ class CloudSEN12Dataset(Dataset):
         # 데이터 타입 변환
         image = image.astype(np.float32)
         label = label.astype(np.int64)
+        
+        # 유효하지 않은 라벨 값을 ignore_index (255)로 매핑
+        # 유효한 값: 0 (clear), 1 (thick cloud), 2 (thin cloud), 3 (cloud shadow)
+        # 유효하지 않은 값: 4, 5, 6, 99 등 -> 255
+        invalid_mask = (label < 0) | (label > 3)
+        label[invalid_mask] = 255
 
         # 정규화
         if self.normalize:

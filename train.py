@@ -9,8 +9,11 @@ Cloud Segmentation Training Module
 """
 
 import argparse
+import json
+import logging
 import os
 import random
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -31,61 +34,83 @@ from l8biome_dataset import L8BiomeDataset
 from cloudsen12_dataset import CloudSEN12Dataset
 from cloud38_95_dataset import Cloud38Dataset, Cloud95Dataset
 
+# Path utilities
+from utils.paths import get_nas_path, detect_nas_base
+
 
 # =============================================================================
 # Dataset Configuration
 # =============================================================================
 
-DATASET_CONFIG = {
-    'l8biome': {
-        'class': L8BiomeDataset,
-        'num_classes': 4,
-        'ignore_index': 255,
-        'class_names': ['clear', 'thin_cloud', 'cloud', 'cloud_shadow'],
-        'default_bands': [4, 3, 2],  # RGB
-        'all_bands': list(range(1, 12)),  # 1-11
-        'data_dir': '/home/telepix_nas/junghwan/cloud_seg/l8biome_extracted/l8biome',
-    },
-    'cloudsen12_l1c': {
-        'class': CloudSEN12Dataset,
-        'num_classes': 4,
-        'ignore_index': None,
-        'class_names': ['clear', 'thick_cloud', 'thin_cloud', 'cloud_shadow'],
-        'default_bands': [4, 3, 2],  # RGB
-        'all_bands': list(range(1, 14)),  # 1-13
-        'data_dir': '/home/telepix_nas/junghwan/cloud_seg/cloudsen12-l1c',
-        'level': 'l1c',
-    },
-    'cloudsen12_l2a': {
-        'class': CloudSEN12Dataset,
-        'num_classes': 4,
-        'ignore_index': None,
-        'class_names': ['clear', 'thick_cloud', 'thin_cloud', 'cloud_shadow'],
-        'default_bands': [4, 3, 2],  # RGB
-        'all_bands': list(range(1, 15)),  # 1-14
-        'data_dir': '/home/telepix_nas/junghwan/cloud_seg/cloudsen12-l2a',
-        'level': 'l2a',
-    },
-    'cloud38': {
-        'class': Cloud38Dataset,
-        'num_classes': 2,
-        'ignore_index': None,
-        'class_names': ['clear', 'cloud'],
-        'default_bands': ['red', 'green', 'blue', 'nir'],
-        'all_bands': ['red', 'green', 'blue', 'nir'],
-        'data_dir': '/home/telepix_nas/junghwan/cloud_seg/38-cloud',
-    },
-    'cloud95': {
-        'class': Cloud95Dataset,
-        'num_classes': 2,
-        'ignore_index': None,
-        'class_names': ['clear', 'cloud'],
-        'default_bands': ['red', 'green', 'blue', 'nir'],
-        'all_bands': ['red', 'green', 'blue', 'nir'],
-        'data_dir_38': '/home/telepix_nas/junghwan/cloud_seg/38-cloud',
-        'data_dir_95': '/home/telepix_nas/junghwan/cloud_seg/95-cloud',
-    },
-}
+def _get_dataset_config():
+    """
+    Get dataset configuration with auto-detected NAS paths.
+    """
+    nas_base = detect_nas_base()
+    if nas_base is None:
+        raise RuntimeError(
+            "[train] NAS path not found. Please ensure one of these paths is available:\n"
+            "  - /home/telepix_nas/junghwan/cloud_seg\n"
+            "  - /nas/junghwan/cloud_seg"
+        )
+
+    return {
+        'l8biome': {
+            'class': L8BiomeDataset,
+            'num_classes': 4,
+            'ignore_index': 255,
+            'class_names': ['clear', 'thin_cloud', 'cloud', 'cloud_shadow'],
+            'default_bands': list(range(1, 12)),  # 1-11 (전체 11채널)
+            'data_dir': get_nas_path('l8biome_extracted/l8biome'),
+        },
+        'cloudsen12_l1c': {
+            'class': CloudSEN12Dataset,
+            'num_classes': 4,
+            'ignore_index': 255,  # Invalid labels (4, 5, 6, 99 등)를 255로 매핑
+            'class_names': ['clear', 'thick_cloud', 'thin_cloud', 'cloud_shadow'],
+            'default_bands': list(range(1, 14)),  # 1-13 (전체 13채널)
+            'data_dir': get_nas_path('cloudsen12-l1c'),
+            'level': 'l1c',
+        },
+        'cloudsen12_l2a': {
+            'class': CloudSEN12Dataset,
+            'num_classes': 4,
+            'ignore_index': 255,  # Invalid labels (4, 5, 6, 99 등)를 255로 매핑
+            'class_names': ['clear', 'thick_cloud', 'thin_cloud', 'cloud_shadow'],
+            'default_bands': list(range(1, 15)),  # 1-14 (전체 14채널)
+            'data_dir': get_nas_path('cloudsen12-l2a'),
+            'level': 'l2a',
+        },
+        'cloud38': {
+            'class': Cloud38Dataset,
+            'num_classes': 2,
+            'ignore_index': None,
+            'class_names': ['clear', 'cloud'],
+            'default_bands': ['red', 'green', 'blue', 'nir'],  # 전체 4채널
+            'data_dir': get_nas_path('38-cloud'),
+        },
+        'cloud95': {
+            'class': Cloud95Dataset,
+            'num_classes': 2,
+            'ignore_index': None,
+            'class_names': ['clear', 'cloud'],
+            'default_bands': ['red', 'green', 'blue', 'nir'],  # 전체 4채널
+            'data_dir_38': get_nas_path('38-cloud'),
+            'data_dir_95': get_nas_path('95-cloud'),
+        },
+    }
+
+
+# Lazy initialization of DATASET_CONFIG
+DATASET_CONFIG = None
+
+
+def get_dataset_config():
+    """Get dataset configuration (lazy initialization)."""
+    global DATASET_CONFIG
+    if DATASET_CONFIG is None:
+        DATASET_CONFIG = _get_dataset_config()
+    return DATASET_CONFIG
 
 
 # =============================================================================
@@ -112,7 +137,7 @@ def get_dataset(dataset_name, split, bands=None, patch_size=512, **kwargs):
         bands: 사용할 밴드 리스트
         patch_size: 패치 크기 (l8biome에서 사용)
     """
-    config = DATASET_CONFIG[dataset_name]
+    config = get_dataset_config()[dataset_name]
 
     if bands is None:
         bands = config['default_bands']
@@ -392,7 +417,131 @@ def validate(model, val_loader, criterion, device, num_classes=4, ignore_index=N
 def save_checkpoint(state, filename):
     """체크포인트 저장"""
     torch.save(state, filename)
-    print(f"Checkpoint saved: {filename}")
+    logging.info(f"Checkpoint saved: {filename}")
+
+
+def setup_logging(output_dir: Path, log_name: str = 'training.log'):
+    """
+    로깅 설정 - 콘솔과 파일 모두에 로그 출력
+
+    Args:
+        output_dir: 로그 파일을 저장할 디렉토리
+        log_name: 로그 파일 이름
+    """
+    log_file = output_dir / log_name
+
+    # 로거 설정
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # 기존 핸들러 제거
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
+    # 포맷터 설정
+    formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)s | %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    # 파일 핸들러
+    file_handler = logging.FileHandler(log_file, mode='w')
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    # 콘솔 핸들러
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    return logger
+
+
+def generate_experiment_name(args):
+    """
+    Arguments에 기반한 실험 이름 생성
+
+    Args:
+        args: Parsed arguments
+
+    Returns:
+        실험 이름 문자열
+    """
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    # 기본 이름: dataset_model
+    name_parts = [args.dataset, args.model]
+
+    # 주요 하이퍼파라미터 추가
+    name_parts.append(f"lr{args.lr}")
+    name_parts.append(f"bs{args.batch_size}")
+    name_parts.append(f"{args.optimizer}")
+
+    # 모델별 특수 파라미터
+    if args.model == 'deeplabv3plus':
+        name_parts.append(f"os{args.output_stride}")
+    elif args.model == 'cdnetv2':
+        name_parts.append(f"aux{args.aux_weight}")
+    elif args.model.startswith('vim_'):
+        name_parts.append(f"{args.decoder_type}")
+        name_parts.append(f"{args.head_type}")
+
+    # 타임스탬프 추가
+    name_parts.append(timestamp)
+
+    return "_".join(str(p) for p in name_parts)
+
+
+def save_config(args, output_dir: Path, additional_info: dict = None):
+    """
+    학습 설정을 JSON 파일로 저장
+
+    Args:
+        args: Parsed arguments
+        output_dir: 저장할 디렉토리
+        additional_info: 추가 정보 (예: in_channels, num_classes)
+    """
+    config = vars(args).copy()
+
+    # 추가 정보 병합
+    if additional_info:
+        config.update(additional_info)
+
+    config_file = output_dir / 'config.json'
+    with open(config_file, 'w') as f:
+        json.dump(config, f, indent=2, default=str)
+
+    logging.info(f"Config saved: {config_file}")
+
+
+def save_history(history: dict, output_dir: Path):
+    """
+    학습 히스토리를 JSON 파일로 저장
+
+    Args:
+        history: 학습/검증 메트릭 히스토리
+        output_dir: 저장할 디렉토리
+    """
+    # numpy array를 list로 변환
+    serializable_history = {}
+    for split, metrics_list in history.items():
+        serializable_history[split] = []
+        for metrics in metrics_list:
+            serializable_metrics = {}
+            for k, v in metrics.items():
+                if isinstance(v, np.ndarray):
+                    serializable_metrics[k] = v.tolist()
+                else:
+                    serializable_metrics[k] = v
+            serializable_history[split].append(serializable_metrics)
+
+    history_file = output_dir / 'history.json'
+    with open(history_file, 'w') as f:
+        json.dump(serializable_history, f, indent=2)
+
+    logging.info(f"History saved: {history_file}")
 
 
 # =============================================================================
@@ -402,11 +551,22 @@ def save_checkpoint(state, filename):
 def main(args):
     # Setup
     set_seed(args.seed)
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+
+    # Device setup
+    if args.gpu is not None:
+        if torch.cuda.is_available() and args.gpu < torch.cuda.device_count():
+            device = torch.device(f'cuda:{args.gpu}')
+            torch.cuda.set_device(args.gpu)
+        else:
+            raise ValueError(
+                f"GPU {args.gpu} is not available. "
+                f"Available GPUs: {torch.cuda.device_count()}"
+            )
+    else:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Dataset configuration
-    dataset_config = DATASET_CONFIG[args.dataset]
+    dataset_config = get_dataset_config()[args.dataset]
     num_classes = dataset_config['num_classes']
     ignore_index = dataset_config['ignore_index']
     class_names = dataset_config['class_names']
@@ -422,18 +582,62 @@ def main(args):
 
     in_channels = len(bands)
 
-    print(f"\n{'='*60}")
-    print(f"Cloud Segmentation Training")
-    print(f"{'='*60}")
-    print(f"Dataset: {args.dataset}")
-    print(f"Model: {args.model}")
-    print(f"Input channels: {in_channels} (bands: {bands})")
-    print(f"Number of classes: {num_classes}")
-    print(f"Class names: {class_names}")
-    print(f"{'='*60}\n")
+    # Output directory 설정 (argument 기반 이름 생성)
+    exp_name = generate_experiment_name(args)
+    output_dir = Path(args.output_dir) / exp_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Checkpoint directory 설정 (NAS 경로 또는 output_dir 사용)
+    if args.checkpoint_dir is not None:
+        checkpoint_dir = Path(args.checkpoint_dir) / exp_name
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        checkpoint_dir = output_dir
+
+    # 로깅 설정
+    setup_logging(output_dir)
+
+    logging.info(f"{'='*60}")
+    logging.info(f"Cloud Segmentation Training")
+    logging.info(f"{'='*60}")
+    logging.info(f"Experiment: {exp_name}")
+    logging.info(f"Log directory: {output_dir}")
+    logging.info(f"Checkpoint directory: {checkpoint_dir}")
+    logging.info(f"Device: {device}")
+    logging.info(f"{'='*60}")
+    logging.info(f"Dataset: {args.dataset}")
+    logging.info(f"Model: {args.model}")
+    logging.info(f"Input channels: {in_channels} (bands: {bands})")
+    logging.info(f"Number of classes: {num_classes}")
+    logging.info(f"Class names: {class_names}")
+    logging.info(f"{'='*60}")
+    logging.info(f"Hyperparameters:")
+    logging.info(f"  - Learning rate: {args.lr}")
+    logging.info(f"  - Batch size: {args.batch_size}")
+    logging.info(f"  - Optimizer: {args.optimizer}")
+    logging.info(f"  - Scheduler: {args.scheduler}")
+    logging.info(f"  - Weight decay: {args.weight_decay}")
+    logging.info(f"  - Epochs: {args.epochs}")
+    logging.info(f"  - Patch size: {args.patch_size}")
+    if args.model.startswith('vim_'):
+        logging.info(f"  - Decoder type: {args.decoder_type}")
+        logging.info(f"  - Head type: {args.head_type}")
+    logging.info(f"{'='*60}")
+
+    # Config 저장
+    save_config(args, output_dir, {
+        'in_channels': in_channels,
+        'num_classes': num_classes,
+        'class_names': class_names,
+        'bands': bands,
+        'device': str(device),
+        'experiment_name': exp_name,
+        'log_dir': str(output_dir),
+        'checkpoint_dir': str(checkpoint_dir),
+    })
 
     # Create dataloaders
-    print("Loading datasets...")
+    logging.info("Loading datasets...")
     train_loader, val_loader, test_loader = create_dataloaders(
         args.dataset,
         batch_size=args.batch_size,
@@ -441,12 +645,12 @@ def main(args):
         patch_size=args.patch_size,
         num_workers=args.num_workers,
     )
-    print(f"Train batches: {len(train_loader)}")
-    print(f"Val batches: {len(val_loader)}")
-    print(f"Test batches: {len(test_loader)}")
+    logging.info(f"Train batches: {len(train_loader)}")
+    logging.info(f"Val batches: {len(val_loader)}")
+    logging.info(f"Test batches: {len(test_loader)}")
 
     # Create model
-    print(f"\nCreating model: {args.model}")
+    logging.info(f"Creating model: {args.model}")
     model = get_model(
         args.model,
         in_channels=in_channels,
@@ -461,8 +665,8 @@ def main(args):
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel()
                            for p in model.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable parameters: {trainable_params:,}")
+    logging.info(f"Total parameters: {total_params:,}")
+    logging.info(f"Trainable parameters: {trainable_params:,}")
 
     # Loss function
     if ignore_index is not None:
@@ -497,23 +701,16 @@ def main(args):
     # Mixed precision
     scaler = GradScaler() if args.amp else None
 
-    # Output directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = Path(args.output_dir) / \
-        f"{args.dataset}_{args.model}_{timestamp}"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     # Training loop
     best_miou = 0.0
     history = {'train': [], 'val': []}
 
-    print(f"\nStarting training for {args.epochs} epochs...")
-    print(f"Output directory: {output_dir}")
+    logging.info(f"Starting training for {args.epochs} epochs...")
 
     for epoch in range(1, args.epochs + 1):
-        print(f"\n{'='*60}")
-        print(f"Epoch {epoch}/{args.epochs}")
-        print(f"{'='*60}")
+        logging.info(f"{'='*60}")
+        logging.info(f"Epoch {epoch}/{args.epochs}")
+        logging.info(f"{'='*60}")
 
         # Train
         train_metrics = train_one_epoch(
@@ -532,77 +729,113 @@ def main(args):
         if scheduler is not None:
             scheduler.step()
 
-        # Log
-        print(f"\nTrain - Loss: {train_metrics['loss']:.4f}, "
-              f"mIoU: {train_metrics['mean_iou']:.4f}, "
-              f"Acc: {train_metrics['accuracy']:.4f}")
-        print(f"Val   - Loss: {val_metrics['loss']:.4f}, "
-              f"mIoU: {val_metrics['mean_iou']:.4f}, "
-              f"Acc: {val_metrics['accuracy']:.4f}")
+        # Get current learning rate
+        current_lr = optimizer.param_groups[0]['lr']
+
+        # Log metrics
+        logging.info(f"Train - Loss: {train_metrics['loss']:.4f}, "
+                     f"mIoU: {train_metrics['mean_iou']:.4f}, "
+                     f"Acc: {train_metrics['accuracy']:.4f}")
+        logging.info(f"Val   - Loss: {val_metrics['loss']:.4f}, "
+                     f"mIoU: {val_metrics['mean_iou']:.4f}, "
+                     f"Acc: {val_metrics['accuracy']:.4f}")
+        logging.info(f"LR: {current_lr:.6f}")
 
         # Class-wise IoU
-        print("Class-wise IoU:")
-        for i, (name, iou) in enumerate(zip(class_names, val_metrics['class_iou'])):
-            print(f"  {name}: {iou:.4f}")
+        class_iou_str = ", ".join([f"{name}: {iou:.4f}"
+                                   for name, iou in zip(class_names, val_metrics['class_iou'])])
+        logging.info(f"Class IoU - {class_iou_str}")
 
         # Save history
+        train_metrics['lr'] = current_lr
         history['train'].append(train_metrics)
         history['val'].append(val_metrics)
 
-        # Save best model
+        # Save best model (to checkpoint_dir - NAS)
         if val_metrics['mean_iou'] > best_miou:
             best_miou = val_metrics['mean_iou']
+            logging.info(f"New best mIoU: {best_miou:.4f}")
             save_checkpoint({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
                 'best_miou': best_miou,
+                'args': vars(args),
                 'config': {
                     'model': args.model,
                     'dataset': args.dataset,
                     'in_channels': in_channels,
                     'num_classes': num_classes,
                     'bands': bands,
+                    'class_names': class_names,
                 }
-            }, output_dir / 'best_model.pth')
+            }, checkpoint_dir / 'best_model.pth')
 
-        # Save latest model
+        # Save periodic checkpoint (to checkpoint_dir - NAS)
         if epoch % args.save_freq == 0:
             save_checkpoint({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
                 'best_miou': best_miou,
-            }, output_dir / f'checkpoint_epoch_{epoch}.pth')
+                'args': vars(args),
+            }, checkpoint_dir / f'checkpoint_epoch_{epoch}.pth')
+
+        # 매 에폭마다 history 저장 (중간에 종료되어도 복구 가능)
+        save_history(history, output_dir)
 
     # Final evaluation on test set
-    print(f"\n{'='*60}")
-    print("Final Evaluation on Test Set")
-    print(f"{'='*60}")
+    logging.info(f"{'='*60}")
+    logging.info("Final Evaluation on Test Set")
+    logging.info(f"{'='*60}")
 
-    # Load best model
-    checkpoint = torch.load(output_dir / 'best_model.pth')
+    # Load best model (from checkpoint_dir)
+    best_model_path = checkpoint_dir / 'best_model.pth'
+    checkpoint = torch.load(best_model_path, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
+    logging.info(f"Loaded best model from: {best_model_path}")
 
     test_metrics = validate(
         model, test_loader, criterion, device,
         num_classes=num_classes, ignore_index=ignore_index,
     )
 
-    print(f"\nTest Results:")
-    print(f"  Loss: {test_metrics['loss']:.4f}")
-    print(f"  mIoU: {test_metrics['mean_iou']:.4f}")
-    print(f"  Accuracy: {test_metrics['accuracy']:.4f}")
-    print(f"\nClass-wise IoU:")
+    logging.info(f"Test Results:")
+    logging.info(f"  Loss: {test_metrics['loss']:.4f}")
+    logging.info(f"  mIoU: {test_metrics['mean_iou']:.4f}")
+    logging.info(f"  Accuracy: {test_metrics['accuracy']:.4f}")
+    logging.info(f"Class-wise IoU:")
     for name, iou in zip(class_names, test_metrics['class_iou']):
-        print(f"  {name}: {iou:.4f}")
+        logging.info(f"  {name}: {iou:.4f}")
 
-    print(f"\n{'='*60}")
-    print(f"Training Complete!")
-    print(f"Best validation mIoU: {best_miou:.4f}")
-    print(f"Test mIoU: {test_metrics['mean_iou']:.4f}")
-    print(f"Output directory: {output_dir}")
-    print(f"{'='*60}")
+    # 최종 결과 저장 (log_dir에 저장)
+    final_results = {
+        'best_val_miou': best_miou,
+        'test_loss': test_metrics['loss'],
+        'test_miou': test_metrics['mean_iou'],
+        'test_accuracy': test_metrics['accuracy'],
+        'test_class_iou': {name: float(iou) for name, iou in zip(class_names, test_metrics['class_iou'])},
+        'best_epoch': checkpoint['epoch'],
+        'total_epochs': args.epochs,
+        'checkpoint_path': str(best_model_path),
+    }
+
+    results_file = output_dir / 'final_results.json'
+    with open(results_file, 'w') as f:
+        json.dump(final_results, f, indent=2)
+    logging.info(f"Final results saved: {results_file}")
+
+    logging.info(f"{'='*60}")
+    logging.info(f"Training Complete!")
+    logging.info(f"Best validation mIoU: {best_miou:.4f}")
+    logging.info(f"Test mIoU: {test_metrics['mean_iou']:.4f}")
+    logging.info(f"Log directory: {output_dir}")
+    logging.info(f"Checkpoint directory: {checkpoint_dir}")
+    logging.info(f"{'='*60}")
+
+    return final_results
 
 
 # =============================================================================
@@ -624,8 +857,8 @@ def parse_args():
 
     # Model
     parser.add_argument('--model', type=str, default='unet',
-                        choices=['unet', 'deeplabv3plus',
-                                 'cdnetv1', 'cdnetv2'],
+                        choices=['unet', 'deeplabv3plus', 'cdnetv1', 'cdnetv2',
+                                 'hrcloudnet', 'vim_tiny', 'vim_small', 'vim_base'],
                         help='Model architecture')
     parser.add_argument('--pretrained', action='store_true', default=True,
                         help='Use pretrained backbone')
@@ -637,6 +870,18 @@ def parse_args():
                         help='Use auxiliary loss for CDNetV2')
     parser.add_argument('--aux_weight', type=float, default=0.4,
                         help='Auxiliary loss weight')
+
+    # VisionMamba specific
+    parser.add_argument('--decoder_type', type=str, default='unet',
+                        choices=['unet', 'deeplab'],
+                        help='Decoder type for VisionMamba (unet or deeplab)')
+    parser.add_argument('--head_type', type=str, default='standard',
+                        choices=['standard', 'edl'],
+                        help='Head type (standard or edl for uncertainty estimation)')
+    parser.add_argument('--edl_annealing_epochs', type=int, default=10,
+                        help='EDL KL annealing epochs')
+    parser.add_argument('--edl_lambda_kl', type=float, default=0.1,
+                        help='EDL KL divergence weight')
 
     # Training
     parser.add_argument('--epochs', type=int, default=100,
@@ -657,12 +902,16 @@ def parse_args():
                         help='Use automatic mixed precision')
 
     # Misc
+    parser.add_argument('--gpu', type=int, default=None,
+                        help='GPU device id to use (e.g., 0, 1). If None, uses cuda:0 if available')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='Number of data loading workers')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
     parser.add_argument('--output_dir', type=str, default='./outputs',
-                        help='Output directory')
+                        help='Output directory for logs, config, and history (local)')
+    parser.add_argument('--checkpoint_dir', type=str, default=None,
+                        help='Checkpoint directory for model weights (NAS). If None, uses output_dir')
     parser.add_argument('--save_freq', type=int, default=10,
                         help='Save checkpoint frequency')
 

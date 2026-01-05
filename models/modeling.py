@@ -13,6 +13,25 @@ from .backbone import resnet
 from .unet import ResNetUNet
 from .cdnetv1 import CDnetV1
 from .cdnetv2 import CDnetV2
+from .hrcloudnet import HRcloudNet
+
+# VisionMamba models (optional - requires mamba_ssm)
+import warnings as _warnings
+
+VIM_AVAILABLE = False
+VIM_IMPORT_ERROR = None
+VimSeg = None
+
+try:
+    from .vim_seg import VimSeg, vim_seg_tiny, vim_seg_small, vim_seg_base, EDLLoss, edl_uncertainty
+    VIM_AVAILABLE = True
+except ImportError as e:
+    VIM_IMPORT_ERROR = e
+    _warnings.warn(
+        f"[modeling] VisionMamba models not available: {e}\n"
+        "To use vim_tiny/vim_small/vim_base, install required dependencies:\n"
+        "  pip install einops"
+    )
 
 
 def _adapt_resnet_input(backbone, in_channels, pretrained):
@@ -184,19 +203,128 @@ def cdnetv2_resnet50(in_channels=3, num_classes=21, pretrained_backbone=True, au
 
 
 # =============================================================================
+# HRCloudNet Models
+# =============================================================================
+
+def hrcloudnet(in_channels=3, num_classes=21, **kwargs):
+    """
+    HRCloudNet (High-Resolution Cloud Network)
+
+    Args:
+        in_channels: 입력 채널 수
+        num_classes: 출력 클래스 수
+    """
+    return HRcloudNet(
+        in_channels=in_channels,
+        num_classes=num_classes,
+    )
+
+
+# =============================================================================
+# VisionMamba Models
+# =============================================================================
+
+def vim_tiny(in_channels=3, num_classes=21, pretrained_backbone=True,
+             decoder_type='unet', head_type='standard', **kwargs):
+    """
+    VisionMamba Tiny for Segmentation
+
+    Args:
+        in_channels: 입력 채널 수
+        num_classes: 출력 클래스 수
+        pretrained_backbone: ImageNet pretrained 사용 여부
+        decoder_type: 디코더 타입 ('unet', 'deeplab')
+        head_type: 헤드 타입 ('standard', 'edl')
+    """
+    if not VIM_AVAILABLE:
+        error_msg = "[vim_tiny] VisionMamba is not available.\n"
+        if VIM_IMPORT_ERROR:
+            error_msg += f"Import error: {VIM_IMPORT_ERROR}\n"
+        error_msg += "Install required packages: pip install einops"
+        raise ImportError(error_msg)
+    return VimSeg(
+        in_channels=in_channels,
+        num_classes=num_classes,
+        backbone='tiny',
+        decoder_type=decoder_type,
+        head_type=head_type,
+        pretrained=pretrained_backbone,
+        **kwargs
+    )
+
+
+def vim_small(in_channels=3, num_classes=21, pretrained_backbone=True,
+              decoder_type='unet', head_type='standard', **kwargs):
+    """
+    VisionMamba Small for Segmentation
+
+    Args:
+        in_channels: 입력 채널 수
+        num_classes: 출력 클래스 수
+        pretrained_backbone: ImageNet pretrained 사용 여부
+        decoder_type: 디코더 타입 ('unet', 'deeplab')
+        head_type: 헤드 타입 ('standard', 'edl')
+    """
+    if not VIM_AVAILABLE:
+        error_msg = "[vim_small] VisionMamba is not available.\n"
+        if VIM_IMPORT_ERROR:
+            error_msg += f"Import error: {VIM_IMPORT_ERROR}\n"
+        error_msg += "Install required packages: pip install einops"
+        raise ImportError(error_msg)
+    return VimSeg(
+        in_channels=in_channels,
+        num_classes=num_classes,
+        backbone='small',
+        decoder_type=decoder_type,
+        head_type=head_type,
+        pretrained=pretrained_backbone,
+        **kwargs
+    )
+
+
+def vim_base(in_channels=3, num_classes=21, pretrained_backbone=True,
+             decoder_type='unet', head_type='standard', **kwargs):
+    """
+    VisionMamba Base for Segmentation
+
+    Args:
+        in_channels: 입력 채널 수
+        num_classes: 출력 클래스 수
+        pretrained_backbone: ImageNet pretrained 사용 여부
+        decoder_type: 디코더 타입 ('unet', 'deeplab')
+        head_type: 헤드 타입 ('standard', 'edl')
+    """
+    if not VIM_AVAILABLE:
+        error_msg = "[vim_base] VisionMamba is not available.\n"
+        if VIM_IMPORT_ERROR:
+            error_msg += f"Import error: {VIM_IMPORT_ERROR}\n"
+        error_msg += "Install required packages: pip install einops"
+        raise ImportError(error_msg)
+    return VimSeg(
+        in_channels=in_channels,
+        num_classes=num_classes,
+        backbone='base',
+        decoder_type=decoder_type,
+        head_type=head_type,
+        pretrained=pretrained_backbone,
+        **kwargs
+    )
+
+
+# =============================================================================
 # Model Factory
 # =============================================================================
 
 MODELS = {
     'unet': unet_resnet50,
-    'unet_resnet50': unet_resnet50,
     'deeplabv3plus': deeplabv3plus_resnet50,
-    'deeplabv3plus_resnet50': deeplabv3plus_resnet50,
-    'deeplabv3plus_resnet101': deeplabv3plus_resnet101,
     'cdnetv1': cdnetv1_resnet50,
-    'cdnetv1_resnet50': cdnetv1_resnet50,
     'cdnetv2': cdnetv2_resnet50,
-    'cdnetv2_resnet50': cdnetv2_resnet50,
+    'hrcloudnet': hrcloudnet,
+    # VisionMamba models
+    'vim_tiny': vim_tiny,
+    'vim_small': vim_small,
+    'vim_base': vim_base,
 }
 
 
@@ -246,6 +374,19 @@ def get_model(model_name, in_channels=3, num_classes=21, pretrained_backbone=Tru
             num_classes=num_classes,
             output_stride=output_stride,
             pretrained_backbone=pretrained_backbone
+        )
+
+    # VisionMamba의 경우 decoder_type, head_type 인자 전달
+    if model_name.startswith('vim_'):
+        decoder_type = kwargs.get('decoder_type', 'unet')
+        head_type = kwargs.get('head_type', 'standard')
+        return model_fn(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            pretrained_backbone=pretrained_backbone,
+            decoder_type=decoder_type,
+            head_type=head_type,
+            **{k: v for k, v in kwargs.items() if k not in ['decoder_type', 'head_type']}
         )
 
     return model_fn(

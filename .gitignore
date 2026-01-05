@@ -1,0 +1,12 @@
+*.pth
+*.json
+*.log
+*.pyc
+__pycache__/
+__pycache__/cloudsen12_dataset.cpython-312.pyc
+__pycache__/cloudsen12_dataset.cpython-312.pyc
+models/__pycache__/__init__.cpython-312.pyc
+models/__pycache__/cdnetv1.cpython-312.pyc
+models/__pycache__/cdnetv2.cpython-312.pyc
+models/__pycache__/modeling.cpython-312.pyc
+models/__pycache__/unet.cpython-312.pyc
