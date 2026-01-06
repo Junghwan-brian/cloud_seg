@@ -98,9 +98,9 @@ MODEL_HYPERPARAMS = {
 # 데이터셋별 기본 설정
 DATASET_DEFAULTS = {
     'l8biome': {'epochs': 10, 'patch_size': 512},
-    'cloudsen12_l1c': {'epochs': 10, 'patch_size': 512},
-    'cloudsen12_l2a': {'epochs': 10, 'patch_size': 512},
-    'cloud38': {'epochs': 10, 'patch_size': 384},
+    'cloudsen12_l1c': {'epochs': 5, 'patch_size': 512},
+    'cloudsen12_l2a': {'epochs': 5, 'patch_size': 512},
+    'cloud38': {'epochs': 20, 'patch_size': 384},
     'cloud95': {'epochs': 10, 'patch_size': 384},
 }
 
@@ -337,7 +337,7 @@ def run_experiments(
 
     try:
         with Pool(processes=max_parallel) as pool:
-            results = pool.map(run_single_experiment, experiment_args)
+            results = pool.map(run_single_experiment, experiment_args, chunksize=1)
     except KeyboardInterrupt:
         print("\n[Main] KeyboardInterrupt received. Cleaning up...")
         cleanup_processes()
