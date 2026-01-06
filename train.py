@@ -956,15 +956,15 @@ def parse_args():
     parser.add_argument('--head_type', type=str, default='standard',
                         choices=['standard', 'edl'],
                         help='Head type (standard or edl for uncertainty estimation)')
-    parser.add_argument('--edl_annealing_epochs', type=int, default=10,
+    parser.add_argument('--edl_annealing_epochs', type=int, default=2,
                         help='EDL KL annealing epochs')
     parser.add_argument('--edl_lambda_kl', type=float, default=0.1,
                         help='EDL KL divergence weight')
 
     # Training
-    parser.add_argument('--epochs', type=int, default=100,
+    parser.add_argument('--epochs', type=int, default=10,
                         help='Number of training epochs')
-    parser.add_argument('--batch_size', type=int, default=8,
+    parser.add_argument('--batch_size', type=int, default=4,
                         help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate')

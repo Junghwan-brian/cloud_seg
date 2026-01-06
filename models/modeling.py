@@ -22,16 +22,8 @@ VIM_AVAILABLE = False
 VIM_IMPORT_ERROR = None
 VimSeg = None
 
-try:
-    from .vim_seg import VimSeg, vim_seg_tiny, vim_seg_small, vim_seg_base, EDLLoss, edl_uncertainty
-    VIM_AVAILABLE = True
-except ImportError as e:
-    VIM_IMPORT_ERROR = e
-    _warnings.warn(
-        f"[modeling] VisionMamba models not available: {e}\n"
-        "To use vim_tiny/vim_small/vim_base, install required dependencies:\n"
-        "  pip install einops"
-    )
+from .vim_seg import VimSeg, vim_seg_tiny, vim_seg_small, vim_seg_base, EDLLoss, edl_uncertainty
+VIM_AVAILABLE = True
 
 
 def _adapt_resnet_input(backbone, in_channels, pretrained):
