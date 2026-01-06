@@ -78,11 +78,18 @@ class ResNetUNet(nn.Module):
             )
             # Initialize from pretrained weights if possible
             if pretrained:
+                # Conv1 가중치 적응: 채널 평균을 새 채널 수만큼 반복
                 pretrained_weight = backbone.conv1.weight.data
-                # Average the pretrained weights across channels
                 new_weight = pretrained_weight.mean(
                     dim=1, keepdim=True).repeat(1, in_channels, 1, 1)
                 self.input_conv[0].weight.data = new_weight
+                
+                # BatchNorm1 가중치 복사 (중요!)
+                self.input_conv[1].weight.data = backbone.bn1.weight.data.clone()
+                self.input_conv[1].bias.data = backbone.bn1.bias.data.clone()
+                self.input_conv[1].running_mean = backbone.bn1.running_mean.clone()
+                self.input_conv[1].running_var = backbone.bn1.running_var.clone()
+                self.input_conv[1].num_batches_tracked = backbone.bn1.num_batches_tracked.clone()
         else:
             self.input_conv = nn.Sequential(
                 backbone.conv1,
