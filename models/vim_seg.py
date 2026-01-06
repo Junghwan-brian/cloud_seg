@@ -610,26 +610,42 @@ class EDLHead(nn.Module):
 
 class EDLLoss(nn.Module):
     """
-    Evidential Deep Learning Loss Function
+    Evidential Deep Learning Loss Function (Official Implementation)
 
     Combines:
-    1. Expected Cross-Entropy Loss (Type II Maximum Likelihood)
-    2. KL Divergence Regularization
+    1. MSE Loss: (y - p)^2 where p = alpha / S
+    2. Variance Loss: Var[p] under Dirichlet distribution
+    3. KL Divergence Regularization with annealing
+
+    Reference: https://github.com/deargen/MT-ENet
     """
 
-    def __init__(self, num_classes, annealing_epochs=10, lambda_kl=0.1):
+    def __init__(self, num_classes, annealing_epochs=10, lambda_kl=1.0,
+                 target_concentration=1.0, epsilon=1e-8):
+        """
+        Args:
+            num_classes: Number of classes
+            annealing_epochs: Total epochs for KL annealing (lambda_kl weight goes from 0 to 1)
+            lambda_kl: KL divergence weight (default 1.0, -1.0 means use annealing only)
+            target_concentration: Target concentration for KL (default 1.0 for uniform)
+            epsilon: Small value for numerical stability
+        """
         super().__init__()
         self.num_classes = num_classes
         self.annealing_epochs = annealing_epochs
         self.lambda_kl = lambda_kl
+        self.target_concentration = target_concentration
+        self.epsilon = epsilon
 
-    def forward(self, alpha: Union[Tensor, Dict[str, Tensor]], target: Tensor, epoch: int = 0,
+    def forward(self, alpha: Union[Tensor, Dict[str, Tensor]], target: Tensor,
+                epoch: int = 0, total_epochs: int = None,
                 ignore_index: int = 255) -> Dict[str, Tensor]:
         """
         Args:
-            alpha: (B, C, H, W) Dirichlet concentration parameters, or dict with 'out' key
+            alpha: (B, C, H, W) Dirichlet concentration parameters, or dict with 'alpha' key
             target: (B, H, W) Ground truth labels
             epoch: Current training epoch (for KL annealing)
+            total_epochs: Total training epochs (for KL annealing, optional)
             ignore_index: Index to ignore in loss computation
 
         Returns:
@@ -637,7 +653,7 @@ class EDLLoss(nn.Module):
         """
         # Handle dict input (from VimSeg EDL head)
         if isinstance(alpha, dict):
-            alpha = alpha['out']
+            alpha = alpha['alpha']
 
         B, C, H, W = alpha.shape
 
@@ -651,60 +667,136 @@ class EDLLoss(nn.Module):
         target = target[valid_mask]
 
         if alpha.numel() == 0:
-            return {'loss': torch.tensor(0.0, device=alpha.device),
-                    'ce_loss': torch.tensor(0.0, device=alpha.device),
-                    'kl_loss': torch.tensor(0.0, device=alpha.device)}
+            zero_loss = torch.tensor(
+                0.0, device=alpha.device if alpha.numel() > 0 else 'cpu')
+            return {'loss': zero_loss, 'mse_loss': zero_loss,
+                    'var_loss': zero_loss, 'kl_loss': zero_loss}
 
         # One-hot encode target
         target_one_hot = F.one_hot(target.long(), num_classes=C).float()
 
-        # Dirichlet strength
+        # Dirichlet strength (sum of alphas)
         S = alpha.sum(dim=-1, keepdim=True)  # (N, 1)
 
-        # Expected probabilities
+        # Expected probabilities: p = alpha / S
         p = alpha / S
 
-        # 1. Expected Cross-Entropy Loss (Type II ML)
-        # E[log p] under Dirichlet = digamma(alpha) - digamma(S)
-        ce_loss = (target_one_hot * (torch.digamma(S) -
-                   torch.digamma(alpha))).sum(dim=-1)
-        ce_loss = ce_loss.mean()
+        # =============================================================
+        # 1. MSE Loss: (y - p)^2
+        # =============================================================
+        mse_loss = (target_one_hot - p).pow(2).sum(dim=-1).mean()
 
-        # 2. KL Divergence Regularization
-        # KL(Dir(alpha) || Dir(1, ..., 1))
+        # =============================================================
+        # 2. Variance Loss: Var[p] = alpha * (S - alpha) / (S^2 * (S + 1))
+        # =============================================================
+        var_loss = (alpha * (S - alpha) / (S * S * (S + 1))).sum(dim=-1).mean()
+
+        # =============================================================
+        # 3. KL Divergence Regularization
+        # =============================================================
+        # Adjust alpha for KL: remove evidence of correct class
+        # alpha_adjusted = (alpha - target_c) * (1 - y) + target_c
+        # This keeps alpha=target_c for correct class, adjusts others
+        alpha_adjusted = (alpha - self.target_concentration) * \
+            (1 - target_one_hot) + self.target_concentration
+
+        # Compute KL divergence
+        kl_loss = self._compute_kl_loss(
+            alpha_adjusted, target,
+            target_concentration=self.target_concentration,
+            concentration=1.0
+        )
+
         # Annealing coefficient
-        annealing_coef = min(1.0, epoch / self.annealing_epochs)
+        if self.lambda_kl == -1.0:
+            # Use epoch-based annealing only
+            if total_epochs is not None:
+                annealing_coef = epoch / total_epochs
+            else:
+                annealing_coef = min(
+                    1.0, epoch / max(1, self.annealing_epochs))
+            kl_weight = annealing_coef
+        else:
+            # Use fixed lambda_kl with optional annealing
+            annealing_coef = min(1.0, epoch / max(1, self.annealing_epochs))
+            kl_weight = annealing_coef * self.lambda_kl
 
-        # Remove evidence of the correct class for KL
-        alpha_tilde = target_one_hot + (1 - target_one_hot) * alpha
-        S_tilde = alpha_tilde.sum(dim=-1, keepdim=True)
-
-        kl_loss = self._kl_divergence(alpha_tilde, S_tilde)
-        kl_loss = kl_loss.mean()
-
-        # Total loss
-        total_loss = ce_loss + annealing_coef * self.lambda_kl * kl_loss
+        # Total loss: MSE + Variance + KL
+        total_loss = mse_loss + var_loss + kl_weight * kl_loss
 
         return {
             'loss': total_loss,
-            'ce_loss': ce_loss,
+            'mse_loss': mse_loss,
+            'var_loss': var_loss,
             'kl_loss': kl_loss,
-            'annealing_coef': torch.tensor(annealing_coef)
+            'annealing_coef': torch.tensor(annealing_coef, device=alpha.device)
         }
 
-    def _kl_divergence(self, alpha, S):
+    def _compute_kl_loss(self, alphas: Tensor, labels: Tensor,
+                         target_concentration: float = 1.0,
+                         concentration: float = 1.0) -> Tensor:
         """
-        KL divergence between Dirichlet and uniform Dirichlet
+        Compute KL divergence loss between predicted Dirichlet and target Dirichlet.
+
+        Args:
+            alphas: (N, C) Adjusted Dirichlet parameters
+            labels: (N,) Ground truth labels
+            target_concentration: Concentration for correct class in target
+            concentration: Base concentration for target Dirichlet
+
+        Returns:
+            KL divergence loss (scalar)
         """
-        K = alpha.shape[-1]
+        C = alphas.shape[-1]
 
-        kl = torch.lgamma(S.squeeze(-1)) - torch.lgamma(torch.tensor(K,
-                                                                     dtype=alpha.dtype, device=alpha.device))
-        kl = kl - torch.lgamma(alpha).sum(dim=-1)
-        kl = kl + ((alpha - 1) * (torch.digamma(alpha) -
-                   torch.digamma(S))).sum(dim=-1)
+        # Create target alphas: uniform Dirichlet with higher concentration for correct class
+        target_alphas = torch.ones_like(alphas) * concentration
+        target_alphas.scatter_add_(
+            -1,
+            labels.unsqueeze(-1),
+            torch.full_like(labels.unsqueeze(-1),
+                            target_concentration - 1, dtype=alphas.dtype)
+        )
 
-        return kl
+        return self._dirichlet_kl_divergence(alphas, target_alphas)
+
+    def _dirichlet_kl_divergence(self, alphas: Tensor, target_alphas: Tensor) -> Tensor:
+        """
+        Compute KL divergence between two Dirichlet distributions.
+        KL(Dir(alphas) || Dir(target_alphas))
+
+        Args:
+            alphas: (N, C) Source Dirichlet parameters
+            target_alphas: (N, C) Target Dirichlet parameters
+
+        Returns:
+            Mean KL divergence (scalar)
+        """
+        eps = self.epsilon
+
+        # Sum of alphas
+        alp0 = alphas.sum(dim=-1, keepdim=True)  # (N, 1)
+        target_alp0 = target_alphas.sum(dim=-1, keepdim=True)  # (N, 1)
+
+        # First term: lgamma(sum(alphas)) - lgamma(sum(target_alphas))
+        alp0_term = torch.lgamma(alp0 + eps) - torch.lgamma(target_alp0 + eps)
+        alp0_term = torch.where(torch.isfinite(
+            alp0_term), alp0_term, torch.zeros_like(alp0_term))
+
+        # Second term: sum of individual lgamma differences and digamma terms
+        alphas_term = torch.sum(
+            torch.lgamma(target_alphas + eps) - torch.lgamma(alphas + eps)
+            + (alphas - target_alphas) *
+            (torch.digamma(alphas + eps) - torch.digamma(alp0 + eps)),
+            dim=-1, keepdim=True
+        )
+        alphas_term = torch.where(torch.isfinite(
+            alphas_term), alphas_term, torch.zeros_like(alphas_term))
+
+        # Total KL divergence
+        kl = (alp0_term + alphas_term).squeeze(-1)
+
+        return kl.mean()
 
 
 def edl_uncertainty(alpha: Tensor) -> Dict[str, Tensor]:

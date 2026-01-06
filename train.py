@@ -28,6 +28,7 @@ from tqdm import tqdm
 
 # Models
 from models.modeling import get_model, list_models
+from models.vim_seg import EDLLoss
 
 # Datasets
 from l8biome_dataset import L8BiomeDataset
@@ -160,6 +161,7 @@ def get_dataset(dataset_name, split, bands=None, patch_size=512, **kwargs):
             bands=bands,
             level=config['level'],
             normalize=True,
+            patch_size=patch_size,  # 패치 크기 추가
             **kwargs
         )
     elif dataset_name == 'cloud38':
@@ -292,7 +294,8 @@ def compute_metrics(pred, target, num_classes, ignore_index=None):
 # =============================================================================
 
 def train_one_epoch(model, train_loader, criterion, optimizer, device,
-                    scaler=None, num_classes=4, ignore_index=None, aux_weight=0.4):
+                    scaler=None, num_classes=4, ignore_index=None, aux_weight=0.4,
+                    epoch=0, total_epochs=100, is_edl=False):
     """한 에폭 학습"""
     model.train()
 
@@ -320,10 +323,25 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device,
                         loss += aux_weight * criterion(aux_out, targets)
                     pred = main_out.argmax(1)
                 elif isinstance(outputs, dict):
-                    # VimSeg 등 dict 반환 모델 처리
-                    main_out = outputs['out']
-                    loss = criterion(main_out, targets)
-                    pred = main_out.argmax(1)
+                    # EDL 모델 처리 (alpha 기반 loss)
+                    if is_edl and 'alpha' in outputs:
+                        loss_dict = criterion(
+                            outputs, targets,
+                            epoch=epoch, total_epochs=total_epochs,
+                            ignore_index=ignore_index if ignore_index is not None else 255
+                        )
+                        loss = loss_dict['loss']
+                        # EDL에서는 prob 또는 alpha를 사용하여 예측
+                        if 'prob' in outputs:
+                            pred = outputs['prob'].argmax(1)
+                        else:
+                            alpha = outputs['alpha']
+                            pred = alpha.argmax(1)
+                    else:
+                        # VimSeg 등 일반 dict 반환 모델 처리
+                        main_out = outputs['out']
+                        loss = criterion(main_out, targets)
+                        pred = main_out.argmax(1)
                 else:
                     loss = criterion(outputs, targets)
                     pred = outputs.argmax(1)
@@ -341,10 +359,25 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device,
                     loss += aux_weight * criterion(aux_out, targets)
                 pred = main_out.argmax(1)
             elif isinstance(outputs, dict):
-                # VimSeg 등 dict 반환 모델 처리
-                main_out = outputs['out']
-                loss = criterion(main_out, targets)
-                pred = main_out.argmax(1)
+                # EDL 모델 처리 (alpha 기반 loss)
+                if is_edl and 'alpha' in outputs:
+                    loss_dict = criterion(
+                        outputs, targets,
+                        epoch=epoch, total_epochs=total_epochs,
+                        ignore_index=ignore_index if ignore_index is not None else 255
+                    )
+                    loss = loss_dict['loss']
+                    # EDL에서는 prob 또는 alpha를 사용하여 예측
+                    if 'prob' in outputs:
+                        pred = outputs['prob'].argmax(1)
+                    else:
+                        alpha = outputs['alpha']
+                        pred = alpha.argmax(1)
+                else:
+                    # VimSeg 등 일반 dict 반환 모델 처리
+                    main_out = outputs['out']
+                    loss = criterion(main_out, targets)
+                    pred = main_out.argmax(1)
             else:
                 loss = criterion(outputs, targets)
                 pred = outputs.argmax(1)
@@ -375,7 +408,8 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device,
 
 
 @torch.no_grad()
-def validate(model, val_loader, criterion, device, num_classes=4, ignore_index=None):
+def validate(model, val_loader, criterion, device, num_classes=4, ignore_index=None,
+             epoch=0, total_epochs=100, is_edl=False):
     """검증"""
     model.eval()
 
@@ -395,11 +429,30 @@ def validate(model, val_loader, criterion, device, num_classes=4, ignore_index=N
 
         if isinstance(outputs, tuple):
             outputs = outputs[0]
+            loss = criterion(outputs, targets)
+            pred = outputs.argmax(1)
         elif isinstance(outputs, dict):
-            outputs = outputs['out']
-
-        loss = criterion(outputs, targets)
-        pred = outputs.argmax(1)
+            # EDL 모델 처리
+            if is_edl and 'alpha' in outputs:
+                loss_dict = criterion(
+                    outputs, targets,
+                    epoch=epoch, total_epochs=total_epochs,
+                    ignore_index=ignore_index if ignore_index is not None else 255
+                )
+                loss = loss_dict['loss']
+                # EDL에서는 prob 또는 alpha를 사용하여 예측
+                if 'prob' in outputs:
+                    pred = outputs['prob'].argmax(1)
+                else:
+                    alpha = outputs['alpha']
+                    pred = alpha.argmax(1)
+            else:
+                outputs = outputs['out']
+                loss = criterion(outputs, targets)
+                pred = outputs.argmax(1)
+        else:
+            loss = criterion(outputs, targets)
+            pred = outputs.argmax(1)
 
         metrics = compute_metrics(pred, targets, num_classes, ignore_index)
 
@@ -681,7 +734,17 @@ def main(args):
     logging.info(f"Trainable parameters: {trainable_params:,}")
 
     # Loss function
-    if ignore_index is not None:
+    is_edl = args.model.startswith('vim_') and args.head_type == 'edl'
+    if is_edl:
+        # EDL Loss for uncertainty estimation
+        criterion = EDLLoss(
+            num_classes=num_classes,
+            annealing_epochs=args.edl_annealing_epochs,
+            lambda_kl=args.edl_lambda_kl,
+        )
+        logging.info(
+            f"Using EDL Loss (annealing_epochs={args.edl_annealing_epochs}, lambda_kl={args.edl_lambda_kl})")
+    elif ignore_index is not None:
         criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
     else:
         criterion = nn.CrossEntropyLoss()
@@ -729,12 +792,14 @@ def main(args):
             model, train_loader, criterion, optimizer, device,
             scaler=scaler, num_classes=num_classes, ignore_index=ignore_index,
             aux_weight=args.aux_weight,
+            epoch=epoch, total_epochs=args.epochs, is_edl=is_edl,
         )
 
         # Validate
         val_metrics = validate(
             model, val_loader, criterion, device,
             num_classes=num_classes, ignore_index=ignore_index,
+            epoch=epoch, total_epochs=args.epochs, is_edl=is_edl,
         )
 
         # Update scheduler
@@ -812,6 +877,7 @@ def main(args):
     test_metrics = validate(
         model, test_loader, criterion, device,
         num_classes=num_classes, ignore_index=ignore_index,
+        epoch=args.epochs, total_epochs=args.epochs, is_edl=is_edl,
     )
 
     logging.info(f"Test Results:")

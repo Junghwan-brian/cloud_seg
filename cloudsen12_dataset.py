@@ -122,6 +122,8 @@ class CloudSEN12Dataset(Dataset):
         target_transform: Optional[Callable] = None,
         normalize: bool = True,
         return_metadata: bool = False,
+        patch_size: Optional[int] = 512,
+        random_crop: bool = True,
     ):
         """
         Args:
@@ -133,6 +135,8 @@ class CloudSEN12Dataset(Dataset):
             target_transform: 레이블에 적용할 변환 함수
             normalize: 이미지 정규화 여부 (True: 0-1 범위로 정규화)
             return_metadata: True면 메타데이터도 함께 반환
+            patch_size: 출력 패치 크기. None이면 원본 크기 유지 (배치 사용 시 주의)
+            random_crop: True면 랜덤 crop, False면 center crop (validation/test용)
         """
         self.level = level.lower()
         if self.level not in ['l1c', 'l2a']:
@@ -149,6 +153,9 @@ class CloudSEN12Dataset(Dataset):
         self.target_transform = target_transform
         self.normalize = normalize
         self.return_metadata = return_metadata
+        self.patch_size = patch_size
+        # validation/test는 center crop, train은 random crop
+        self.random_crop = random_crop if split == 'train' else False
 
         # TACO 파일 로드
         taco_files = sorted(glob.glob(str(self.taco_dir / '*.taco')))
@@ -182,6 +189,57 @@ class CloudSEN12Dataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.dataset)
+
+    def _crop_to_patch_size(
+        self, image: np.ndarray, label: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        이미지와 레이블을 패치 크기에 맞게 crop합니다.
+
+        Args:
+            image: (C, H, W) 형태의 이미지
+            label: (H, W) 형태의 레이블
+
+        Returns:
+            cropped image, cropped label
+        """
+        _, h, w = image.shape
+        patch_size = self.patch_size
+
+        # 패치 크기보다 작으면 패딩
+        if h < patch_size or w < patch_size:
+            pad_h = max(0, patch_size - h)
+            pad_w = max(0, patch_size - w)
+            # 이미지 패딩 (C, H, W) -> 0으로 패딩
+            image = np.pad(
+                image,
+                ((0, 0), (0, pad_h), (0, pad_w)),
+                mode='constant',
+                constant_values=0
+            )
+            # 레이블 패딩 -> 255 (ignore_index)로 패딩
+            label = np.pad(
+                label,
+                ((0, pad_h), (0, pad_w)),
+                mode='constant',
+                constant_values=255
+            )
+            h, w = h + pad_h, w + pad_w
+
+        # Crop 위치 결정
+        if self.random_crop:
+            top = np.random.randint(0, h - patch_size + 1)
+            left = np.random.randint(0, w - patch_size + 1)
+        else:
+            # Center crop
+            top = (h - patch_size) // 2
+            left = (w - patch_size) // 2
+
+        # Crop 적용 (contiguous array를 위해 copy 사용)
+        image = image[:, top:top + patch_size, left:left + patch_size].copy()
+        label = label[top:top + patch_size, left:left + patch_size].copy()
+
+        return image, label
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -223,6 +281,10 @@ class CloudSEN12Dataset(Dataset):
         # 유효하지 않은 값: 4, 5, 6, 99 등 -> 255
         invalid_mask = (label < 0) | (label > 3)
         label[invalid_mask] = 255
+
+        # 패치 크기에 맞게 crop
+        if self.patch_size is not None:
+            image, label = self._crop_to_patch_size(image, label)
 
         # 정규화
         if self.normalize:
