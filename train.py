@@ -128,7 +128,7 @@ def set_seed(seed):
     torch.backends.cudnn.benchmark = False
 
 
-def get_dataset(dataset_name, split, bands=None, patch_size=512, **kwargs):
+def get_dataset(dataset_name, split, bands=None, patch_size=512, preload=False, **kwargs):
     """
     데이터셋 생성
 
@@ -137,6 +137,7 @@ def get_dataset(dataset_name, split, bands=None, patch_size=512, **kwargs):
         split: 'train', 'val', 'test'
         bands: 사용할 밴드 리스트
         patch_size: 패치 크기 (l8biome에서 사용)
+        preload: 데이터를 메모리에 미리 로드할지 여부 (빠른 학습)
     """
     config = get_dataset_config()[dataset_name]
 
@@ -150,6 +151,8 @@ def get_dataset(dataset_name, split, bands=None, patch_size=512, **kwargs):
             patch_size=patch_size,
             bands=bands,
             normalize=True,
+            use_cache=True,  # 파일 핸들 캐싱 활성화
+            preload=preload,  # 메모리 프리로드 옵션
             **kwargs
         )
     elif dataset_name.startswith('cloudsen12'):
@@ -170,6 +173,7 @@ def get_dataset(dataset_name, split, bands=None, patch_size=512, **kwargs):
             split=split,
             bands=bands,
             normalize=True,
+            preload=preload,  # 메모리 프리로드 옵션
             **kwargs
         )
     elif dataset_name == 'cloud95':
@@ -179,6 +183,7 @@ def get_dataset(dataset_name, split, bands=None, patch_size=512, **kwargs):
             split=split,
             bands=bands,
             normalize=True,
+            preload=preload,  # 메모리 프리로드 옵션
             **kwargs
         )
     else:
@@ -188,36 +193,59 @@ def get_dataset(dataset_name, split, bands=None, patch_size=512, **kwargs):
 
 
 def create_dataloaders(dataset_name, batch_size, bands=None, patch_size=512,
-                       num_workers=4, pin_memory=True):
-    """학습/검증/테스트 데이터로더 생성"""
+                       num_workers=4, pin_memory=True, preload=False,
+                       prefetch_factor=4, persistent_workers=True):
+    """
+    학습/검증/테스트 데이터로더 생성
 
-    train_dataset = get_dataset(dataset_name, 'train', bands, patch_size)
-    val_dataset = get_dataset(dataset_name, 'val', bands, patch_size)
-    test_dataset = get_dataset(dataset_name, 'test', bands, patch_size)
+    Args:
+        dataset_name: 데이터셋 이름
+        batch_size: 배치 크기
+        bands: 사용할 밴드 리스트
+        patch_size: 패치 크기
+        num_workers: 데이터 로딩 워커 수
+        pin_memory: GPU 메모리 핀닝
+        preload: 데이터를 메모리에 미리 로드 (빠른 학습)
+        prefetch_factor: 각 워커당 미리 로드할 배치 수 (기본값 4)
+        persistent_workers: 워커를 에폭 간 유지 (초기화 오버헤드 감소)
+    """
+
+    train_dataset = get_dataset(
+        dataset_name, 'train', bands, patch_size, preload=preload)
+    val_dataset = get_dataset(
+        dataset_name, 'val', bands, patch_size, preload=preload)
+    test_dataset = get_dataset(
+        dataset_name, 'test', bands, patch_size, preload=False)  # 테스트는 프리로드 안함
+
+    # 워커가 있을 때만 prefetch_factor와 persistent_workers 사용
+    loader_kwargs = {
+        'pin_memory': pin_memory,
+        'num_workers': num_workers,
+    }
+    if num_workers > 0:
+        loader_kwargs['prefetch_factor'] = prefetch_factor
+        loader_kwargs['persistent_workers'] = persistent_workers
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
         drop_last=True,
+        **loader_kwargs
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
+        **loader_kwargs
     )
 
     test_loader = DataLoader(
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
+        **loader_kwargs
     )
 
     return train_loader, val_loader, test_loader
@@ -703,12 +731,17 @@ def main(args):
 
     # Create dataloaders
     logging.info("Loading datasets...")
+    if args.preload:
+        logging.info("Preloading data to memory for faster training...")
     train_loader, val_loader, test_loader = create_dataloaders(
         args.dataset,
         batch_size=args.batch_size,
         bands=bands,
         patch_size=args.patch_size,
         num_workers=args.num_workers,
+        preload=args.preload,
+        prefetch_factor=args.prefetch_factor,
+        persistent_workers=args.num_workers > 0,
     )
     logging.info(f"Train batches: {len(train_loader)}")
     logging.info(f"Val batches: {len(val_loader)}")
@@ -994,6 +1027,12 @@ def parse_args():
                         help='Checkpoint directory for model weights (NAS). If None, uses output_dir')
     parser.add_argument('--save_freq', type=int, default=10,
                         help='Save checkpoint frequency')
+
+    # Data loading optimization
+    parser.add_argument('--preload', action='store_true',
+                        help='Preload all data to memory for faster training (requires more RAM)')
+    parser.add_argument('--prefetch_factor', type=int, default=4,
+                        help='Number of batches to prefetch per worker (default: 4)')
 
     return parser.parse_args()
 

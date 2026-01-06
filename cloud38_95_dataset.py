@@ -36,6 +36,7 @@ Landsat 8 Cloud Segmentation Dataset (38-Cloud 및 95-Cloud)를 위한 PyTorch D
 """
 
 import random
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional, List, Tuple, Callable, Union, Literal
 
@@ -44,6 +45,28 @@ import pandas as pd
 from PIL import Image
 import torch
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
+from tqdm import tqdm
+
+
+# =============================================================================
+# 이미지 캐싱을 위한 유틸리티 함수들
+# =============================================================================
+
+@lru_cache(maxsize=2048)
+def _cached_load_image(path: str) -> np.ndarray:
+    """
+    LRU 캐시를 사용하여 이미지를 로드합니다.
+    캐시 크기: 2048개 (약 4GB 메모리 사용, 384x384 float32 기준)
+    """
+    return np.array(Image.open(path), dtype=np.float32)
+
+
+@lru_cache(maxsize=2048)
+def _cached_load_mask(path: str) -> np.ndarray:
+    """
+    LRU 캐시를 사용하여 마스크를 로드합니다.
+    """
+    return np.array(Image.open(path), dtype=np.int64)
 
 
 # 기본 경로
@@ -100,6 +123,7 @@ class Cloud38Dataset(Dataset):
         val_ratio: float = 0.1,
         random_seed: int = 42,
         return_metadata: bool = False,
+        preload: bool = False,
     ):
         """
         Args:
@@ -112,6 +136,7 @@ class Cloud38Dataset(Dataset):
             val_ratio: 학습 데이터에서 검증 데이터로 분리할 비율
             random_seed: 데이터 분할을 위한 시드
             return_metadata: True면 메타데이터도 함께 반환
+            preload: True면 모든 데이터를 메모리에 미리 로드 (빠른 학습, 메모리 사용 증가)
         """
         self.root = Path(root) if root else Path(DEFAULT_38CLOUD_DIR)
         self.split = split
@@ -122,6 +147,8 @@ class Cloud38Dataset(Dataset):
         self.val_ratio = val_ratio
         self.random_seed = random_seed
         self.return_metadata = return_metadata
+        self.preload = preload
+        self._preloaded_data = None
 
         # 밴드 유효성 검사
         for band in self.bands:
@@ -145,6 +172,10 @@ class Cloud38Dataset(Dataset):
             self.patches = self._split_train_val()
 
         print(f"Cloud38 Dataset loaded: {len(self.patches)} patches ({split})")
+
+        # 데이터 프리로드
+        if preload:
+            self._preload_all_data()
 
     def _load_patches(self) -> List[str]:
         """패치 목록을 로드합니다."""
@@ -171,6 +202,38 @@ class Cloud38Dataset(Dataset):
             return patches[:n_val]
         else:  # train
             return patches[n_val:]
+
+    def _preload_all_data(self):
+        """모든 데이터를 메모리에 미리 로드합니다."""
+        print(f"Preloading {len(self.patches)} patches to memory...")
+        self._preloaded_data = []
+
+        for patch_name in tqdm(self.patches, desc="Preloading"):
+            # 각 밴드 이미지 로드
+            band_images = []
+            for band in self.bands:
+                band_path = self._get_band_path(patch_name, band)
+                img = np.array(Image.open(band_path), dtype=np.float32)
+                band_images.append(img)
+
+            image = np.stack(band_images, axis=0)
+
+            # GT 마스크 로드
+            if self.has_gt:
+                gt_path = self._get_gt_path(patch_name)
+                mask = np.array(Image.open(gt_path), dtype=np.int64)
+                mask = (mask == 255).astype(np.int64)
+            else:
+                mask = np.zeros(
+                    (self.PATCH_SIZE, self.PATCH_SIZE), dtype=np.int64)
+
+            self._preloaded_data.append({
+                'image': image,
+                'mask': mask,
+            })
+
+        print(
+            f"Preloading complete. Memory usage: ~{len(self._preloaded_data) * 4 * 384 * 384 * 4 / 1e9:.2f} GB")
 
     def _get_band_path(self, patch_name: str, band: str) -> Path:
         """밴드 이미지 경로를 생성합니다."""
@@ -201,25 +264,31 @@ class Cloud38Dataset(Dataset):
         """
         patch_name = self.patches[idx]
 
-        # 각 밴드 이미지 로드
-        band_images = []
-        for band in self.bands:
-            band_path = self._get_band_path(patch_name, band)
-            img = np.array(Image.open(band_path), dtype=np.float32)
-            band_images.append(img)
-
-        # 채널 축으로 스택 (C, H, W)
-        image = np.stack(band_images, axis=0)
-
-        # GT 마스크 로드
-        if self.has_gt:
-            gt_path = self._get_gt_path(patch_name)
-            mask = np.array(Image.open(gt_path), dtype=np.int64)
-            # 원본에서 255=cloud, 0=clear -> 0=clear, 1=cloud로 변환
-            mask = (mask == 255).astype(np.int64)
+        # 프리로드된 데이터가 있으면 사용
+        if self._preloaded_data is not None:
+            image = self._preloaded_data[idx]['image'].copy()
+            mask = self._preloaded_data[idx]['mask'].copy()
         else:
-            # 테스트셋은 마스크 없음 -> 더미 마스크 생성
-            mask = np.zeros((self.PATCH_SIZE, self.PATCH_SIZE), dtype=np.int64)
+            # 캐시된 로딩 함수 사용
+            band_images = []
+            for band in self.bands:
+                band_path = str(self._get_band_path(patch_name, band))
+                img = _cached_load_image(band_path)
+                band_images.append(img)
+
+            # 채널 축으로 스택 (C, H, W)
+            image = np.stack(band_images, axis=0)
+
+            # GT 마스크 로드
+            if self.has_gt:
+                gt_path = str(self._get_gt_path(patch_name))
+                mask = _cached_load_mask(gt_path)
+                # 원본에서 255=cloud, 0=clear -> 0=clear, 1=cloud로 변환
+                mask = (mask == 255).astype(np.int64)
+            else:
+                # 테스트셋은 마스크 없음 -> 더미 마스크 생성
+                mask = np.zeros(
+                    (self.PATCH_SIZE, self.PATCH_SIZE), dtype=np.int64)
 
         # 정규화
         if self.normalize:
@@ -406,6 +475,7 @@ class Cloud95Dataset(Dataset):
         val_ratio: float = 0.1,
         random_seed: int = 42,
         return_metadata: bool = False,
+        preload: bool = False,
     ):
         """
         Args:
@@ -419,6 +489,7 @@ class Cloud95Dataset(Dataset):
             val_ratio: 검증 데이터 비율
             random_seed: 랜덤 시드
             return_metadata: 메타데이터 반환 여부
+            preload: True면 모든 데이터를 메모리에 미리 로드 (빠른 학습, 메모리 사용 증가)
         """
         self.root_38cloud = Path(
             root_38cloud) if root_38cloud else Path(DEFAULT_38CLOUD_DIR)
@@ -432,6 +503,8 @@ class Cloud95Dataset(Dataset):
         self.val_ratio = val_ratio
         self.random_seed = random_seed
         self.return_metadata = return_metadata
+        self.preload = preload
+        self._preloaded_data = None
 
         # 테스트셋은 38-Cloud 테스트셋 사용
         if split == 'test':
@@ -444,6 +517,10 @@ class Cloud95Dataset(Dataset):
             self.patches = self._split_train_val()
 
         print(f"Cloud95 Dataset loaded: {len(self.patches)} patches ({split})")
+
+        # 데이터 프리로드
+        if preload:
+            self._preload_all_data()
 
     def _load_test_patches(self) -> List[dict]:
         """테스트 패치 목록을 로드합니다."""
@@ -511,6 +588,38 @@ class Cloud95Dataset(Dataset):
         else:  # train
             return patches[n_val:]
 
+    def _preload_all_data(self):
+        """모든 데이터를 메모리에 미리 로드합니다."""
+        print(f"Preloading {len(self.patches)} patches to memory...")
+        self._preloaded_data = []
+
+        for patch_info in tqdm(self.patches, desc="Preloading"):
+            # 각 밴드 이미지 로드
+            band_images = []
+            for band in self.bands:
+                band_path = self._get_band_path(patch_info, band)
+                img = np.array(Image.open(band_path), dtype=np.float32)
+                band_images.append(img)
+
+            image = np.stack(band_images, axis=0)
+
+            # GT 마스크 로드
+            if self._use_38cloud_test:
+                mask = np.zeros(
+                    (self.PATCH_SIZE, self.PATCH_SIZE), dtype=np.int64)
+            else:
+                gt_path = self._get_gt_path(patch_info)
+                mask = np.array(Image.open(gt_path), dtype=np.int64)
+                mask = (mask == 255).astype(np.int64)
+
+            self._preloaded_data.append({
+                'image': image,
+                'mask': mask,
+            })
+
+        print(
+            f"Preloading complete. Memory usage: ~{len(self._preloaded_data) * 4 * 384 * 384 * 4 / 1e9:.2f} GB")
+
     def _get_band_path(self, patch_info: dict, band: str) -> Path:
         """밴드 이미지 경로를 생성합니다."""
         name = patch_info['name']
@@ -548,23 +657,29 @@ class Cloud95Dataset(Dataset):
         """데이터셋에서 샘플을 가져옵니다."""
         patch_info = self.patches[idx]
 
-        # 각 밴드 이미지 로드
-        band_images = []
-        for band in self.bands:
-            band_path = self._get_band_path(patch_info, band)
-            img = np.array(Image.open(band_path), dtype=np.float32)
-            band_images.append(img)
-
-        image = np.stack(band_images, axis=0)
-
-        # GT 마스크 로드
-        if self._use_38cloud_test:
-            # 테스트셋은 GT 없음
-            mask = np.zeros((self.PATCH_SIZE, self.PATCH_SIZE), dtype=np.int64)
+        # 프리로드된 데이터가 있으면 사용
+        if self._preloaded_data is not None:
+            image = self._preloaded_data[idx]['image'].copy()
+            mask = self._preloaded_data[idx]['mask'].copy()
         else:
-            gt_path = self._get_gt_path(patch_info)
-            mask = np.array(Image.open(gt_path), dtype=np.int64)
-            mask = (mask == 255).astype(np.int64)
+            # 캐시된 로딩 함수 사용
+            band_images = []
+            for band in self.bands:
+                band_path = str(self._get_band_path(patch_info, band))
+                img = _cached_load_image(band_path)
+                band_images.append(img)
+
+            image = np.stack(band_images, axis=0)
+
+            # GT 마스크 로드
+            if self._use_38cloud_test:
+                # 테스트셋은 GT 없음
+                mask = np.zeros(
+                    (self.PATCH_SIZE, self.PATCH_SIZE), dtype=np.int64)
+            else:
+                gt_path = str(self._get_gt_path(patch_info))
+                mask = _cached_load_mask(gt_path)
+                mask = (mask == 255).astype(np.int64)
 
         # 정규화
         if self.normalize:

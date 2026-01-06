@@ -31,6 +31,7 @@ Landsat 8 Cloud Cover Assessment Validation Data를 기반으로 한 PyTorch Dat
 """
 
 import random
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional, List, Tuple, Callable, Union, Literal
 
@@ -39,6 +40,63 @@ import rasterio as rio
 from rasterio.windows import Window
 import torch
 from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
+
+
+# =============================================================================
+# 파일 핸들 캐싱을 위한 유틸리티
+# =============================================================================
+
+class RasterioFileCache:
+    """
+    Rasterio 파일 핸들을 캐싱하여 반복적인 파일 열기/닫기 오버헤드를 줄입니다.
+    """
+    def __init__(self, max_size: int = 64):
+        self.max_size = max_size
+        self._cache = {}
+        self._access_order = []
+
+    def get(self, path: str):
+        """캐시된 파일 핸들을 반환하거나 새로 엽니다."""
+        if path in self._cache:
+            # LRU 업데이트
+            self._access_order.remove(path)
+            self._access_order.append(path)
+            return self._cache[path]
+
+        # 캐시가 꽉 차면 가장 오래된 항목 제거
+        if len(self._cache) >= self.max_size:
+            oldest = self._access_order.pop(0)
+            self._cache[oldest].close()
+            del self._cache[oldest]
+
+        # 새 파일 열기
+        src = rio.open(path)
+        self._cache[path] = src
+        self._access_order.append(path)
+        return src
+
+    def close_all(self):
+        """모든 캐시된 파일 핸들을 닫습니다."""
+        for src in self._cache.values():
+            src.close()
+        self._cache.clear()
+        self._access_order.clear()
+
+    def __del__(self):
+        self.close_all()
+
+
+# 전역 파일 캐시 (프로세스별)
+_file_cache = None
+
+
+def _get_file_cache() -> RasterioFileCache:
+    """전역 파일 캐시를 반환합니다."""
+    global _file_cache
+    if _file_cache is None:
+        _file_cache = RasterioFileCache(max_size=128)
+    return _file_cache
 
 
 # 기본 경로
@@ -119,6 +177,8 @@ class L8BiomeDataset(Dataset):
         min_valid_ratio: float = 0.5,
         random_seed: int = 42,
         return_metadata: bool = False,
+        use_cache: bool = True,
+        preload: bool = False,
     ):
         """
         Args:
@@ -133,6 +193,8 @@ class L8BiomeDataset(Dataset):
             min_valid_ratio: 최소 유효 픽셀 비율 (Fill 제외). 이보다 낮으면 패치 제외
             random_seed: 데이터 분할을 위한 시드
             return_metadata: True면 메타데이터도 함께 반환
+            use_cache: True면 파일 핸들 캐싱 사용 (권장)
+            preload: True면 모든 패치를 메모리에 미리 로드 (빠른 학습, 메모리 사용 증가)
         """
         self.data_dir = Path(data_dir) if data_dir else Path(DEFAULT_DATA_DIR)
         self.biomes = biomes if biomes else BIOMES
@@ -145,6 +207,9 @@ class L8BiomeDataset(Dataset):
         self.min_valid_ratio = min_valid_ratio
         self.random_seed = random_seed
         self.return_metadata = return_metadata
+        self.use_cache = use_cache
+        self.preload = preload
+        self._preloaded_data = None
 
         # biome 유효성 검사
         for biome in self.biomes:
@@ -167,6 +232,10 @@ class L8BiomeDataset(Dataset):
             self.patches = None
             print(
                 f"L8 Biome Dataset loaded: {len(self.split_scenes)} scenes ({split})")
+
+        # 데이터 프리로드
+        if preload and self.patches:
+            self._preload_all_data()
 
     def _collect_scenes(self) -> List[dict]:
         """각 biome에서 장면 정보를 수집합니다."""
@@ -252,6 +321,56 @@ class L8BiomeDataset(Dataset):
 
         return patches
 
+    def _preload_all_data(self):
+        """모든 패치를 메모리에 미리 로드합니다."""
+        print(f"Preloading {len(self.patches)} patches to memory...")
+        self._preloaded_data = []
+
+        # 장면별로 이미지를 한 번만 열고 모든 패치 추출
+        scene_patches = {}
+        for idx, patch in enumerate(self.patches):
+            scene_idx = patch['scene_idx']
+            if scene_idx not in scene_patches:
+                scene_patches[scene_idx] = []
+            scene_patches[scene_idx].append((idx, patch))
+
+        # 장면별로 처리
+        for scene_idx in tqdm(sorted(scene_patches.keys()), desc="Preloading scenes"):
+            scene = self.split_scenes[scene_idx]
+
+            with rio.open(scene['image_path']) as img_src, \
+                 rio.open(scene['mask_path']) as mask_src:
+
+                for idx, patch in scene_patches[scene_idx]:
+                    row, col = patch['row'], patch['col']
+                    window = Window(col, row, self.patch_size, self.patch_size)
+
+                    if self.bands:
+                        image = img_src.read(self.bands, window=window)
+                    else:
+                        image = img_src.read(window=window)
+
+                    mask = mask_src.read(1, window=window)
+                    mask = self._convert_mask(mask)
+
+                    # 유효 픽셀 비율 체크
+                    valid_ratio = np.mean(mask != self.IGNORE_INDEX)
+
+                    self._preloaded_data.append({
+                        'image': image.astype(np.float32),
+                        'mask': mask,
+                        'valid_ratio': valid_ratio,
+                        'scene_idx': scene_idx,
+                        'row': row,
+                        'col': col,
+                    })
+
+        # 메모리 사용량 계산
+        sample = self._preloaded_data[0]
+        bytes_per_sample = sample['image'].nbytes + sample['mask'].nbytes
+        total_gb = len(self._preloaded_data) * bytes_per_sample / 1e9
+        print(f"Preloading complete. Memory usage: ~{total_gb:.2f} GB")
+
     def __len__(self) -> int:
         if self.patches:
             return len(self.patches)
@@ -278,7 +397,19 @@ class L8BiomeDataset(Dataset):
             label: (H, W) 형태의 레이블 텐서
             metadata: (optional) 메타데이터 딕셔너리
         """
-        if self.patches:
+        # 프리로드된 데이터 사용
+        if self._preloaded_data is not None:
+            data = self._preloaded_data[idx]
+            image = data['image'].copy()
+            mask = data['mask'].copy()
+            valid_ratio = data['valid_ratio']
+            scene = self.split_scenes[data['scene_idx']]
+            row, col = data['row'], data['col']
+
+            # 유효 픽셀 비율 체크
+            if valid_ratio < self.min_valid_ratio:
+                return self.__getitem__(random.randint(0, len(self) - 1))
+        elif self.patches:
             patch_info = self.patches[idx]
             scene = self.split_scenes[patch_info['scene_idx']]
             row, col = patch_info['row'], patch_info['col']
@@ -286,14 +417,38 @@ class L8BiomeDataset(Dataset):
             # Windowed reading
             window = Window(col, row, self.patch_size, self.patch_size)
 
-            with rio.open(scene['image_path']) as src:
-                if self.bands:
-                    image = src.read(self.bands, window=window)
-                else:
-                    image = src.read(window=window)
+            # 캐시 사용
+            if self.use_cache:
+                cache = _get_file_cache()
+                img_src = cache.get(scene['image_path'])
+                mask_src = cache.get(scene['mask_path'])
 
-            with rio.open(scene['mask_path']) as src:
-                mask = src.read(1, window=window)
+                if self.bands:
+                    image = img_src.read(self.bands, window=window)
+                else:
+                    image = img_src.read(window=window)
+                mask = mask_src.read(1, window=window)
+            else:
+                with rio.open(scene['image_path']) as src:
+                    if self.bands:
+                        image = src.read(self.bands, window=window)
+                    else:
+                        image = src.read(window=window)
+
+                with rio.open(scene['mask_path']) as src:
+                    mask = src.read(1, window=window)
+
+            # 마스크 변환
+            mask = self._convert_mask(mask)
+
+            # 유효 픽셀 비율 체크
+            valid_ratio = np.mean(mask != self.IGNORE_INDEX)
+            if valid_ratio < self.min_valid_ratio:
+                # 유효하지 않은 패치는 랜덤 샘플링으로 대체
+                return self.__getitem__(random.randint(0, len(self) - 1))
+
+            # 데이터 타입 변환
+            image = image.astype(np.float32)
         else:
             # 전체 이미지 로딩 (메모리 주의)
             scene = self.split_scenes[idx]
@@ -309,18 +464,11 @@ class L8BiomeDataset(Dataset):
 
             row, col = 0, 0
 
-        # 마스크 변환
-        mask = self._convert_mask(mask)
+            # 마스크 변환
+            mask = self._convert_mask(mask)
 
-        # 유효 픽셀 비율 체크 (패치 모드에서)
-        if self.patches:
-            valid_ratio = np.mean(mask != self.IGNORE_INDEX)
-            if valid_ratio < self.min_valid_ratio:
-                # 유효하지 않은 패치는 랜덤 샘플링으로 대체
-                return self.__getitem__(random.randint(0, len(self) - 1))
-
-        # 데이터 타입 변환
-        image = image.astype(np.float32)
+            # 데이터 타입 변환
+            image = image.astype(np.float32)
 
         # 정규화
         if self.normalize:

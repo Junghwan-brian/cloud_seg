@@ -9,6 +9,12 @@ Hyperparameter Tuning Script with Multiprocessing
     # 특정 데이터셋으로 모든 모델 실험
     python run_experiments.py --gpus 0 1 2 3 4 5 6 7 --checkpoint_dir /nas/junghwan/cloud_seg/checkpoints --all_datasets --all_models --include_vim --max_parallel 16
 
+    # 데이터 로딩 최적화 (메모리 프리로드)
+    python run_experiments.py --gpus 0 1 --all_models --dataset cloud95 --preload
+
+    # prefetch_factor와 num_workers 조정
+    python run_experiments.py --gpus 0 1 2 3 --all_models --dataset l8biome --prefetch_factor 8 --num_workers 8
+
 """
 
 import argparse
@@ -204,12 +210,12 @@ def run_single_experiment(args):
     단일 실험 실행 (worker 프로세스에서 호출됨).
 
     Args:
-        args: (config, gpu_id, output_base, checkpoint_base, should_stop, child_processes)
+        args: (config, gpu_id, output_base, checkpoint_base, should_stop, child_processes, data_loading_opts)
 
     Returns:
         (config, success, message)
     """
-    config, gpu_id, output_base, checkpoint_base, should_stop, child_processes = args
+    config, gpu_id, output_base, checkpoint_base, should_stop, child_processes, data_loading_opts = args
 
     # 종료 신호 체크
     if should_stop.value:
@@ -235,6 +241,15 @@ def run_single_experiment(args):
     # checkpoint_dir 추가 (NAS 경로)
     if checkpoint_base is not None:
         cmd.extend(['--checkpoint_dir', str(checkpoint_base)])
+
+    # 데이터 로딩 최적화 옵션 추가
+    if data_loading_opts.get('preload', False):
+        cmd.append('--preload')
+    if 'prefetch_factor' in data_loading_opts:
+        cmd.extend(
+            ['--prefetch_factor', str(data_loading_opts['prefetch_factor'])])
+    if 'num_workers' in data_loading_opts:
+        cmd.extend(['--num_workers', str(data_loading_opts['num_workers'])])
 
     # 하이퍼파라미터 추가
     hp_keys = ['lr', 'batch_size', 'optimizer', 'scheduler', 'weight_decay',
@@ -296,6 +311,7 @@ def run_experiments(
     max_parallel: int,
     output_base: Path,
     checkpoint_base: Optional[Path] = None,
+    data_loading_opts: Optional[Dict[str, Any]] = None,
 ):
     """
     멀티프로세싱을 사용하여 여러 실험을 병렬 실행.
@@ -306,15 +322,19 @@ def run_experiments(
         max_parallel: 최대 동시 실행 수
         output_base: 출력 디렉토리 (로그, config 등 - 로컬)
         checkpoint_base: 체크포인트 디렉토리 (모델 - NAS)
+        data_loading_opts: 데이터 로딩 최적화 옵션 (preload, prefetch_factor, num_workers)
     """
     global _should_stop, _child_processes
+
+    if data_loading_opts is None:
+        data_loading_opts = {}
 
     # 실험에 GPU 할당 (라운드 로빈)
     experiment_args = []
     for i, config in enumerate(configs):
         gpu_id = gpus[i % len(gpus)]
         experiment_args.append(
-            (config, gpu_id, output_base, checkpoint_base, _should_stop, _child_processes))
+            (config, gpu_id, output_base, checkpoint_base, _should_stop, _child_processes, data_loading_opts))
 
     print(f"\n{'='*60}")
     print(f"Running {len(configs)} experiments on GPUs {gpus}")
@@ -337,7 +357,8 @@ def run_experiments(
 
     try:
         with Pool(processes=max_parallel) as pool:
-            results = pool.map(run_single_experiment, experiment_args, chunksize=1)
+            results = pool.map(run_single_experiment,
+                               experiment_args, chunksize=1)
     except KeyboardInterrupt:
         print("\n[Main] KeyboardInterrupt received. Cleaning up...")
         cleanup_processes()
@@ -440,6 +461,14 @@ Examples:
     parser.add_argument('--quick', action='store_true',
                         help='Quick test mode (reduced hyperparameter space)')
 
+    # 데이터 로딩 최적화
+    parser.add_argument('--preload', action='store_true',
+                        help='Preload all data to memory for faster training (requires more RAM)')
+    parser.add_argument('--prefetch_factor', type=int, default=4,
+                        help='Number of batches to prefetch per worker (default: 4)')
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help='Number of data loading workers (default: 4)')
+
     return parser.parse_args()
 
 
@@ -539,6 +568,18 @@ def main():
         print("Error: No experiment configurations generated")
         sys.exit(1)
 
+    # 데이터 로딩 최적화 옵션
+    data_loading_opts = {
+        'preload': args.preload,
+        'prefetch_factor': args.prefetch_factor,
+        'num_workers': args.num_workers,
+    }
+
+    if args.preload:
+        print(f"[Info] Data preloading enabled - faster training but requires more RAM")
+    print(
+        f"[Info] Data loading: prefetch_factor={args.prefetch_factor}, num_workers={args.num_workers}")
+
     # 실험 실행
     try:
         results = run_experiments(
@@ -547,6 +588,7 @@ def main():
             max_parallel=args.max_parallel,
             output_base=output_base,
             checkpoint_base=checkpoint_base,
+            data_loading_opts=data_loading_opts,
         )
 
         # 결과 저장
