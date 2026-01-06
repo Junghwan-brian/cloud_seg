@@ -7,7 +7,7 @@ Hyperparameter Tuning Script with Multiprocessing
 
 사용법:
     # 특정 데이터셋으로 모든 모델 실험
-    python run_experiments.py --gpus 0 1 2 3 4 5 6 7 --checkpoint_dir /nas/junghwan/cloud_seg/checkpoints --all_datasets --all_models
+    python run_experiments.py --gpus 0 1 2 3 4 5 6 7 --checkpoint_dir /nas/junghwan/cloud_seg/checkpoints --all_datasets --all_models --include_vim --max_parallel 16
 
 """
 
@@ -30,44 +30,44 @@ from typing import Dict, List, Any, Optional
 # 각 모델별 탐색할 하이퍼파라미터 설정
 MODEL_HYPERPARAMS = {
     'unet': {
-        'lr': [5e-4, 1e-4],
-        'batch_size': [4],
+        'lr': [5e-4],
+        'batch_size': [8],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
     },
     'deeplabv3plus': {
-        'lr': [5e-4, 1e-4],
-        'batch_size': [4],
-        'optimizer': ['adamw', 'sgd'],
+        'lr': [5e-4],
+        'batch_size': [8],
+        'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
         'output_stride': [16],
     },
     'cdnetv1': {
-        'lr': [5e-4, 1e-4],
-        'batch_size': [4],
+        'lr': [5e-4],
+        'batch_size': [8],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
     },
     'cdnetv2': {
-        'lr': [5e-4, 1e-4],
-        'batch_size': [4],
+        'lr': [5e-4],
+        'batch_size': [8],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
-        'aux_weight': [0.4, 0.2],
+        'aux_weight': [0.2],
     },
     'hrcloudnet': {
-        'lr': [5e-4, 1e-4],
-        'batch_size': [4],  # HRCloudNet은 메모리 사용량이 큼
+        'lr': [5e-4],
+        'batch_size': [8],  # HRCloudNet은 메모리 사용량이 큼
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
     },
     'vim_tiny': {
-        'lr': [1e-3, 5e-4, 1e-4, 5e-5],
+        'lr': [1e-4, 1e-5],
         'batch_size': [4],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
@@ -76,7 +76,7 @@ MODEL_HYPERPARAMS = {
         'head_type': ['standard', 'edl'],
     },
     'vim_small': {
-        'lr': [1e-3, 5e-4, 1e-4, 5e-5],
+        'lr': [1e-4, 1e-5],
         'batch_size': [4],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
@@ -84,15 +84,15 @@ MODEL_HYPERPARAMS = {
         'decoder_type': ['unet', 'deeplab'],
         'head_type': ['standard', 'edl'],
     },
-    'vim_base': {
-        'lr': [1e-3, 5e-4, 1e-4, 5e-5],
-        'batch_size': [4],  # vim_base는 메모리 사용량이 매우 큼
-        'optimizer': ['adamw'],
-        'scheduler': ['cosine'],
-        'weight_decay': [1e-4],
-        'decoder_type': ['unet', 'deeplab'],
-        'head_type': ['standard', 'edl'],
-    },
+    # 'vim_base': {
+    #     'lr': [1e-4, 1e-5],
+    #     'batch_size': [4],  # vim_base는 메모리 사용량이 매우 큼
+    #     'optimizer': ['adamw'],
+    #     'scheduler': ['cosine'],
+    #     'weight_decay': [1e-4],
+    #     'decoder_type': ['unet', 'deeplab'],
+    #     'head_type': ['standard', 'edl'],
+    # },
 }
 
 # 데이터셋별 기본 설정
@@ -478,7 +478,7 @@ def main():
         models = ['unet', 'deeplabv3plus', 'cdnetv1', 'cdnetv2', 'hrcloudnet']
         # VisionMamba 모델 포함 (메모리 사용량이 크므로 batch_size 조정 필요)
         if args.include_vim:
-            models += ['vim_tiny', 'vim_small', 'vim_base']
+            models += ['vim_tiny', 'vim_small']
             print(
                 "[Info] VisionMamba models included. Note: These models require more GPU memory.")
     elif args.model:
