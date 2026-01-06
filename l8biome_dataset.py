@@ -322,12 +322,47 @@ class L8BiomeDataset(Dataset):
 
         return patches
 
-    def _preload_all_data(self):
-        """모든 패치를 메모리에 미리 로드합니다."""
-        print(f"Preloading {len(self.patches)} patches to memory...")
-        self._preloaded_data = []
+    def _load_scene_patches(self, scene_idx: int, patches_info: list) -> list:
+        """하나의 장면에서 모든 패치를 로드합니다 (병렬 로딩용)."""
+        scene = self.split_scenes[scene_idx]
+        results = []
 
-        # 장면별로 이미지를 한 번만 열고 모든 패치 추출
+        with rio.open(scene['image_path']) as img_src, \
+                rio.open(scene['mask_path']) as mask_src:
+
+            for idx, patch in patches_info:
+                row, col = patch['row'], patch['col']
+                window = Window(col, row, self.patch_size, self.patch_size)
+
+                if self.bands:
+                    image = img_src.read(self.bands, window=window)
+                else:
+                    image = img_src.read(window=window)
+
+                mask = mask_src.read(1, window=window)
+                mask = self._convert_mask(mask)
+
+                valid_ratio = np.mean(mask != self.IGNORE_INDEX)
+
+                results.append((idx, {
+                    'image': image.astype(np.float32),
+                    'mask': mask,
+                    'valid_ratio': valid_ratio,
+                    'scene_idx': scene_idx,
+                    'row': row,
+                    'col': col,
+                }))
+
+        return results
+
+    def _preload_all_data(self):
+        """모든 패치를 메모리에 병렬로 미리 로드합니다."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        print(
+            f"Preloading {len(self.patches)} patches to memory (parallel)...")
+
+        # 장면별로 패치 그룹화
         scene_patches = {}
         for idx, patch in enumerate(self.patches):
             scene_idx = patch['scene_idx']
@@ -335,36 +370,22 @@ class L8BiomeDataset(Dataset):
                 scene_patches[scene_idx] = []
             scene_patches[scene_idx].append((idx, patch))
 
-        # 장면별로 처리
-        for scene_idx in tqdm(sorted(scene_patches.keys()), desc="Preloading scenes"):
-            scene = self.split_scenes[scene_idx]
+        # 결과 저장용 리스트
+        self._preloaded_data = [None] * len(self.patches)
 
-            with rio.open(scene['image_path']) as img_src, \
-                    rio.open(scene['mask_path']) as mask_src:
+        # 장면별로 병렬 처리
+        num_threads = min(16, len(scene_patches))
 
-                for idx, patch in scene_patches[scene_idx]:
-                    row, col = patch['row'], patch['col']
-                    window = Window(col, row, self.patch_size, self.patch_size)
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {
+                executor.submit(self._load_scene_patches, scene_idx, patches_info): scene_idx
+                for scene_idx, patches_info in scene_patches.items()
+            }
 
-                    if self.bands:
-                        image = img_src.read(self.bands, window=window)
-                    else:
-                        image = img_src.read(window=window)
-
-                    mask = mask_src.read(1, window=window)
-                    mask = self._convert_mask(mask)
-
-                    # 유효 픽셀 비율 체크
-                    valid_ratio = np.mean(mask != self.IGNORE_INDEX)
-
-                    self._preloaded_data.append({
-                        'image': image.astype(np.float32),
-                        'mask': mask,
-                        'valid_ratio': valid_ratio,
-                        'scene_idx': scene_idx,
-                        'row': row,
-                        'col': col,
-                    })
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Preloading scenes"):
+                results = future.result()
+                for idx, data in results:
+                    self._preloaded_data[idx] = data
 
         # 메모리 사용량 계산
         sample = self._preloaded_data[0]

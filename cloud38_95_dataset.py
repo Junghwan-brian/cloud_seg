@@ -203,34 +203,45 @@ class Cloud38Dataset(Dataset):
         else:  # train
             return patches[n_val:]
 
+    def _load_single_patch(self, patch_name: str) -> dict:
+        """단일 패치를 로드합니다 (병렬 로딩용)."""
+        band_images = []
+        for band in self.bands:
+            band_path = self._get_band_path(patch_name, band)
+            img = np.array(Image.open(band_path), dtype=np.float32)
+            band_images.append(img)
+
+        image = np.stack(band_images, axis=0)
+
+        if self.has_gt:
+            gt_path = self._get_gt_path(patch_name)
+            mask = np.array(Image.open(gt_path), dtype=np.int64)
+            mask = (mask == 255).astype(np.int64)
+        else:
+            mask = np.zeros((self.PATCH_SIZE, self.PATCH_SIZE), dtype=np.int64)
+
+        return {'image': image, 'mask': mask}
+
     def _preload_all_data(self):
-        """모든 데이터를 메모리에 미리 로드합니다."""
-        print(f"Preloading {len(self.patches)} patches to memory...")
-        self._preloaded_data = []
+        """모든 데이터를 메모리에 병렬로 미리 로드합니다."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        for patch_name in tqdm(self.patches, desc="Preloading"):
-            # 각 밴드 이미지 로드
-            band_images = []
-            for band in self.bands:
-                band_path = self._get_band_path(patch_name, band)
-                img = np.array(Image.open(band_path), dtype=np.float32)
-                band_images.append(img)
+        print(
+            f"Preloading {len(self.patches)} patches to memory (parallel)...")
 
-            image = np.stack(band_images, axis=0)
+        # ThreadPoolExecutor로 병렬 로드 (I/O 바운드 작업에 적합)
+        num_threads = min(32, len(self.patches))
+        self._preloaded_data = [None] * len(self.patches)
 
-            # GT 마스크 로드
-            if self.has_gt:
-                gt_path = self._get_gt_path(patch_name)
-                mask = np.array(Image.open(gt_path), dtype=np.int64)
-                mask = (mask == 255).astype(np.int64)
-            else:
-                mask = np.zeros(
-                    (self.PATCH_SIZE, self.PATCH_SIZE), dtype=np.int64)
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {
+                executor.submit(self._load_single_patch, patch_name): idx
+                for idx, patch_name in enumerate(self.patches)
+            }
 
-            self._preloaded_data.append({
-                'image': image,
-                'mask': mask,
-            })
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Preloading"):
+                idx = futures[future]
+                self._preloaded_data[idx] = future.result()
 
         print(
             f"Preloading complete. Memory usage: ~{len(self._preloaded_data) * 4 * 384 * 384 * 4 / 1e9:.2f} GB")
@@ -588,34 +599,45 @@ class Cloud95Dataset(Dataset):
         else:  # train
             return patches[n_val:]
 
+    def _load_single_patch(self, patch_info: dict) -> dict:
+        """단일 패치를 로드합니다 (병렬 로딩용)."""
+        band_images = []
+        for band in self.bands:
+            band_path = self._get_band_path(patch_info, band)
+            img = np.array(Image.open(band_path), dtype=np.float32)
+            band_images.append(img)
+
+        image = np.stack(band_images, axis=0)
+
+        if self._use_38cloud_test:
+            mask = np.zeros((self.PATCH_SIZE, self.PATCH_SIZE), dtype=np.int64)
+        else:
+            gt_path = self._get_gt_path(patch_info)
+            mask = np.array(Image.open(gt_path), dtype=np.int64)
+            mask = (mask == 255).astype(np.int64)
+
+        return {'image': image, 'mask': mask}
+
     def _preload_all_data(self):
-        """모든 데이터를 메모리에 미리 로드합니다."""
-        print(f"Preloading {len(self.patches)} patches to memory...")
-        self._preloaded_data = []
+        """모든 데이터를 메모리에 병렬로 미리 로드합니다."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        for patch_info in tqdm(self.patches, desc="Preloading"):
-            # 각 밴드 이미지 로드
-            band_images = []
-            for band in self.bands:
-                band_path = self._get_band_path(patch_info, band)
-                img = np.array(Image.open(band_path), dtype=np.float32)
-                band_images.append(img)
+        print(
+            f"Preloading {len(self.patches)} patches to memory (parallel)...")
 
-            image = np.stack(band_images, axis=0)
+        # ThreadPoolExecutor로 병렬 로드 (I/O 바운드 작업에 적합)
+        num_threads = min(32, len(self.patches))
+        self._preloaded_data = [None] * len(self.patches)
 
-            # GT 마스크 로드
-            if self._use_38cloud_test:
-                mask = np.zeros(
-                    (self.PATCH_SIZE, self.PATCH_SIZE), dtype=np.int64)
-            else:
-                gt_path = self._get_gt_path(patch_info)
-                mask = np.array(Image.open(gt_path), dtype=np.int64)
-                mask = (mask == 255).astype(np.int64)
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {
+                executor.submit(self._load_single_patch, patch_info): idx
+                for idx, patch_info in enumerate(self.patches)
+            }
 
-            self._preloaded_data.append({
-                'image': image,
-                'mask': mask,
-            })
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Preloading"):
+                idx = futures[future]
+                self._preloaded_data[idx] = future.result()
 
         print(
             f"Preloading complete. Memory usage: ~{len(self._preloaded_data) * 4 * 384 * 384 * 4 / 1e9:.2f} GB")
