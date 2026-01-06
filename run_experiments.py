@@ -345,7 +345,7 @@ def run_experiments(
     print(f"{'='*60}\n")
 
     # 실험 목록 출력
-    for i, (config, gpu_id, _, _, _, _) in enumerate(experiment_args):
+    for i, (config, gpu_id, _, _, _, _, _) in enumerate(experiment_args):
         print(f"  [{i+1}] GPU {gpu_id}: {config['model']} on {config['dataset']}")
         params = {k: v for k, v in config.items()
                   if k not in ['model', 'dataset', 'epochs', 'patch_size']}

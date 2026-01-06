@@ -51,6 +51,7 @@ class RasterioFileCache:
     """
     Rasterio 파일 핸들을 캐싱하여 반복적인 파일 열기/닫기 오버헤드를 줄입니다.
     """
+
     def __init__(self, max_size: int = 64):
         self.max_size = max_size
         self._cache = {}
@@ -339,7 +340,7 @@ class L8BiomeDataset(Dataset):
             scene = self.split_scenes[scene_idx]
 
             with rio.open(scene['image_path']) as img_src, \
-                 rio.open(scene['mask_path']) as mask_src:
+                    rio.open(scene['mask_path']) as mask_src:
 
                 for idx, patch in scene_patches[scene_idx]:
                     row, col = patch['row'], patch['col']
