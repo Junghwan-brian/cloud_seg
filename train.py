@@ -723,6 +723,8 @@ def main(args):
         pretrained_backbone=args.pretrained,
         aux=args.aux,
         output_stride=args.output_stride,
+        decoder_type=args.decoder_type,
+        head_type=args.head_type,
     )
     model = model.to(device)
 
