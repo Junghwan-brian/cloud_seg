@@ -205,14 +205,31 @@ class CDnetV1(nn.Module):
 
     def _init_weights(self):
         for m in [self.res5_con1x1, self.fpm1, self.fpm2, self.fpm3,
-                  self.br1, self.br2, self.br3, self.br4, self.br5, self.br6, self.br7,
-                  self.predict1, self.predict2, self.predict3]:
+                  self.br1, self.br2, self.br3, self.br4, self.br5, self.br6, self.br7]:
             for layer in m.modules():
                 if isinstance(layer, nn.Conv2d):
                     nn.init.kaiming_normal_(
                         layer.weight, mode='fan_out', nonlinearity='relu')
                     if layer.bias is not None:
                         nn.init.zeros_(layer.bias)
+                elif isinstance(layer, nn.BatchNorm2d):
+                    nn.init.constant_(layer.weight, 1)
+                    nn.init.constant_(layer.bias, 0)
+
+        # Predict 레이어는 별도 초기화 (마지막 분류 레이어는 작은 값으로)
+        for predict_layer in [self.predict1, self.predict2, self.predict3]:
+            for i, layer in enumerate(predict_layer):
+                if isinstance(layer, nn.Conv2d):
+                    if i == len(predict_layer) - 1:
+                        # 마지막 분류 레이어: 작은 값으로 초기화
+                        nn.init.normal_(layer.weight, mean=0, std=0.01)
+                        if layer.bias is not None:
+                            nn.init.zeros_(layer.bias)
+                    else:
+                        nn.init.kaiming_normal_(
+                            layer.weight, mode='fan_out', nonlinearity='relu')
+                        if layer.bias is not None:
+                            nn.init.zeros_(layer.bias)
                 elif isinstance(layer, nn.BatchNorm2d):
                     nn.init.constant_(layer.weight, 1)
                     nn.init.constant_(layer.bias, 0)
