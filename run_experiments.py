@@ -6,14 +6,9 @@ Hyperparameter Tuning Script with Multiprocessing
 각 모델별로 하이퍼파라미터 튜닝을 지원.
 
 사용법:
-    # 기본 실행 (GPU 0, 1 사용, 최대 2개 동시 실행)
-    python run_experiments.py --gpus 0 1 --max_parallel 2 --model unet
-
     # 특정 데이터셋으로 모든 모델 실험
-    python run_experiments.py --gpus 0 1 2 3 --max_parallel 4 --dataset l8biome
+    python run_experiments.py --gpus 0 1 2 3 4 5 6 7 --checkpoint_dir /nas/junghwan/cloud_seg/checkpoints --all_datasets --all_models
 
-    # 커스텀 하이퍼파라미터 조합 사용
-    python run_experiments.py --gpus 0 1 --model deeplabv3plus --lr 1e-3 1e-4 --batch_size 8 16
 """
 
 import argparse
@@ -36,14 +31,14 @@ from typing import Dict, List, Any, Optional
 MODEL_HYPERPARAMS = {
     'unet': {
         'lr': [5e-4, 1e-4],
-        'batch_size': [8],
+        'batch_size': [4],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
     },
     'deeplabv3plus': {
         'lr': [5e-4, 1e-4],
-        'batch_size': [8],
+        'batch_size': [4],
         'optimizer': ['adamw', 'sgd'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
@@ -51,14 +46,14 @@ MODEL_HYPERPARAMS = {
     },
     'cdnetv1': {
         'lr': [5e-4, 1e-4],
-        'batch_size': [8],
+        'batch_size': [4],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
     },
     'cdnetv2': {
         'lr': [5e-4, 1e-4],
-        'batch_size': [8],
+        'batch_size': [4],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
@@ -66,14 +61,14 @@ MODEL_HYPERPARAMS = {
     },
     'hrcloudnet': {
         'lr': [5e-4, 1e-4],
-        'batch_size': [8],  # HRCloudNet은 메모리 사용량이 큼
+        'batch_size': [4],  # HRCloudNet은 메모리 사용량이 큼
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
     },
     'vim_tiny': {
         'lr': [1e-3, 5e-4, 1e-4, 5e-5],
-        'batch_size': [8],
+        'batch_size': [4],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
@@ -82,7 +77,7 @@ MODEL_HYPERPARAMS = {
     },
     'vim_small': {
         'lr': [1e-3, 5e-4, 1e-4, 5e-5],
-        'batch_size': [8],
+        'batch_size': [4],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
@@ -91,7 +86,7 @@ MODEL_HYPERPARAMS = {
     },
     'vim_base': {
         'lr': [1e-3, 5e-4, 1e-4, 5e-5],
-        'batch_size': [8],  # vim_base는 메모리 사용량이 매우 큼
+        'batch_size': [4],  # vim_base는 메모리 사용량이 매우 큼
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
@@ -102,11 +97,11 @@ MODEL_HYPERPARAMS = {
 
 # 데이터셋별 기본 설정
 DATASET_DEFAULTS = {
-    'l8biome': {'epochs': 100, 'patch_size': 512},
-    'cloudsen12_l1c': {'epochs': 100, 'patch_size': 512},
-    'cloudsen12_l2a': {'epochs': 100, 'patch_size': 512},
-    'cloud38': {'epochs': 100, 'patch_size': 384},
-    'cloud95': {'epochs': 100, 'patch_size': 384},
+    'l8biome': {'epochs': 10, 'patch_size': 512},
+    'cloudsen12_l1c': {'epochs': 10, 'patch_size': 512},
+    'cloudsen12_l2a': {'epochs': 10, 'patch_size': 512},
+    'cloud38': {'epochs': 10, 'patch_size': 384},
+    'cloud95': {'epochs': 10, 'patch_size': 384},
 }
 
 # =============================================================================
@@ -181,7 +176,7 @@ def generate_experiment_configs(
 
     # 데이터셋 기본값
     dataset_defaults = DATASET_DEFAULTS.get(
-        dataset, {'epochs': 100, 'patch_size': 512})
+        dataset, {'epochs': 10, 'patch_size': 512})
 
     if epochs is None:
         epochs = dataset_defaults['epochs']
