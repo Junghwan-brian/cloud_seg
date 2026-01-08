@@ -7,7 +7,7 @@ Hyperparameter Tuning Script with Multiprocessing
 
 사용법:
     # 특정 데이터셋으로 모든 모델 실험
-    python run_experiments.py --gpus 0 1 2 3 4 5 6 7 --checkpoint_dir /nas/junghwan/cloud_seg/checkpoints --all_datasets --all_models --include_vim --max_parallel 16
+    python run_experiments.py --gpus 0 1 2 3 4 5 6 7 --checkpoint_dir /nas/junghwan/cloud_seg/checkpoints --all_models --include_vim --max_parallel 8 --dataset cloud95
 
     # 데이터 로딩 최적화 (메모리 프리로드)
     python run_experiments.py --gpus 0 1 --all_models --dataset cloud95 --preload
@@ -73,7 +73,7 @@ MODEL_HYPERPARAMS = {
         'weight_decay': [1e-4],
     },
     'vim_tiny': {
-        'lr': [1e-4, 1e-5],
+        'lr': [1e-4],
         'batch_size': [4],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
@@ -82,7 +82,7 @@ MODEL_HYPERPARAMS = {
         'head_type': ['standard', 'edl'],
     },
     'vim_small': {
-        'lr': [1e-4, 1e-5],
+        'lr': [1e-4],
         'batch_size': [4],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
@@ -91,7 +91,7 @@ MODEL_HYPERPARAMS = {
         'head_type': ['standard', 'edl'],
     },
     # 'vim_base': {
-    #     'lr': [1e-4, 1e-5],
+    #     'lr': [1e-4],
     #     'batch_size': [4],  # vim_base는 메모리 사용량이 매우 큼
     #     'optimizer': ['adamw'],
     #     'scheduler': ['cosine'],
@@ -103,11 +103,11 @@ MODEL_HYPERPARAMS = {
 
 # 데이터셋별 기본 설정
 DATASET_DEFAULTS = {
-    'l8biome': {'epochs': 10, 'patch_size': 512},
-    'cloudsen12_l1c': {'epochs': 5, 'patch_size': 512},
-    'cloudsen12_l2a': {'epochs': 5, 'patch_size': 512},
-    'cloud38': {'epochs': 20, 'patch_size': 384},
-    'cloud95': {'epochs': 10, 'patch_size': 384},
+    'l8biome': {'epochs': 5, 'patch_size': 512},
+    'cloudsen12_l1c': {'epochs': 3, 'patch_size': 512},
+    'cloudsen12_l2a': {'epochs': 3, 'patch_size': 512},
+    'cloud38': {'epochs': 10, 'patch_size': 384},
+    'cloud95': {'epochs': 5, 'patch_size': 384},
 }
 
 # =============================================================================

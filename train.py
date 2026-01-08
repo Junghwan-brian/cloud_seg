@@ -1025,7 +1025,7 @@ def parse_args():
     parser.add_argument('--head_type', type=str, default='standard',
                         choices=['standard', 'edl'],
                         help='Head type (standard or edl for uncertainty estimation)')
-    parser.add_argument('--edl_annealing_epochs', type=int, default=2,
+    parser.add_argument('--edl_annealing_epochs', type=int, default=1,
                         help='EDL KL annealing epochs')
     parser.add_argument('--edl_lambda_kl', type=float, default=0.1,
                         help='EDL KL divergence weight')
@@ -1059,7 +1059,7 @@ def parse_args():
                         help='Output directory for logs, config, and history (local)')
     parser.add_argument('--checkpoint_dir', type=str, default=None,
                         help='Checkpoint directory for model weights (NAS). If None, uses output_dir')
-    parser.add_argument('--save_freq', type=int, default=10,
+    parser.add_argument('--save_freq', type=int, default=1,
                         help='Save checkpoint frequency')
 
     # Data loading optimization
