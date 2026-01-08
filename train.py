@@ -118,14 +118,28 @@ def get_dataset_config():
 # Helper Functions
 # =============================================================================
 
-def set_seed(seed):
-    """재현성을 위한 시드 설정"""
+def set_seed(seed, deterministic=False):
+    """
+    재현성을 위한 시드 설정
+
+    Args:
+        seed: 랜덤 시드
+        deterministic: True면 완전한 재현성 보장 (느림), 
+                       False면 성능 우선 (기본값)
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+
+    if deterministic:
+        # 완전한 재현성 모드 (느림)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    else:
+        # 성능 우선 모드 (빠름) - 입력 크기가 고정된 경우 최적
+        torch.backends.cudnn.deterministic = False
+        torch.backends.cudnn.benchmark = True
 
 
 def get_dataset(dataset_name, split, bands=None, patch_size=512, preload=False, **kwargs):
@@ -165,6 +179,8 @@ def get_dataset(dataset_name, split, bands=None, patch_size=512, preload=False, 
             level=config['level'],
             normalize=True,
             patch_size=patch_size,  # 패치 크기 추가
+            use_cache=True,  # 파일 핸들 캐싱 활성화
+            preload=preload,  # 메모리 프리로드 옵션
             **kwargs
         )
     elif dataset_name == 'cloud38':
@@ -272,7 +288,7 @@ class AverageMeter:
 
 def compute_metrics(pred, target, num_classes, ignore_index=None):
     """
-    분할 메트릭 계산 (IoU, Accuracy)
+    분할 메트릭 계산 (IoU, Accuracy) - GPU 최적화 버전
 
     Args:
         pred: 예측값 (B, H, W)
@@ -292,20 +308,38 @@ def compute_metrics(pred, target, num_classes, ignore_index=None):
         pred = pred[valid_mask]
         target = target[valid_mask]
 
-    # Confusion matrix
+    # 빈 텐서 처리
+    if pred.numel() == 0:
+        return {
+            'iou': np.zeros(num_classes),
+            'mean_iou': 0.0,
+            'accuracy': 0.0,
+        }
+
+    # GPU에서 직접 Confusion Matrix 계산 (scatter_add 사용)
+    # 이 방식은 bincount보다 GPU에서 더 효율적
     confusion_matrix = torch.zeros(
-        num_classes, num_classes, device=pred.device)
-    for t, p in zip(target, pred):
-        confusion_matrix[t.long(), p.long()] += 1
+        num_classes, num_classes,
+        dtype=torch.float32,
+        device=pred.device
+    )
+
+    # one-hot 인코딩 + 행렬 누적
+    indices = target.long() * num_classes + pred.long()
+    ones = torch.ones_like(indices, dtype=torch.float32)
+    confusion_matrix.view(-1).scatter_add_(0, indices, ones)
 
     # IoU per class
     intersection = torch.diag(confusion_matrix)
     union = confusion_matrix.sum(0) + confusion_matrix.sum(1) - intersection
     iou = intersection / (union + 1e-10)
 
-    # Mean IoU
+    # Mean IoU (유효한 클래스만)
     valid_classes = union > 0
-    mean_iou = iou[valid_classes].mean()
+    if valid_classes.sum() > 0:
+        mean_iou = iou[valid_classes].mean()
+    else:
+        mean_iou = torch.tensor(0.0, device=pred.device)
 
     # Accuracy
     accuracy = intersection.sum() / (confusion_matrix.sum() + 1e-10)
@@ -642,8 +676,8 @@ def save_history(history: dict, output_dir: Path):
 # =============================================================================
 
 def main(args):
-    # Setup
-    set_seed(args.seed)
+    # Setup - 기본은 성능 우선 모드, --deterministic 옵션으로 재현성 모드 선택 가능
+    set_seed(args.seed, deterministic=args.deterministic)
 
     # Device setup
     if args.gpu is not None:
@@ -1017,8 +1051,8 @@ def parse_args():
     # Misc
     parser.add_argument('--gpu', type=int, default=None,
                         help='GPU device id to use (e.g., 0, 1). If None, uses cuda:0 if available')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='Number of data loading workers')
+    parser.add_argument('--num_workers', type=int, default=8,
+                        help='Number of data loading workers (default: 8 for NAS I/O)')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
     parser.add_argument('--output_dir', type=str, default='./outputs',
@@ -1033,6 +1067,8 @@ def parse_args():
                         help='Preload all data to memory for faster training (requires more RAM)')
     parser.add_argument('--prefetch_factor', type=int, default=4,
                         help='Number of batches to prefetch per worker (default: 4)')
+    parser.add_argument('--deterministic', action='store_true',
+                        help='Enable deterministic mode (slower but reproducible)')
 
     return parser.parse_args()
 

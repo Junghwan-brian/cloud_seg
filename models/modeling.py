@@ -2,9 +2,11 @@
 Cloud Segmentation Models
 
 모든 모델에 대한 통합 인터페이스를 제공합니다.
-지원 모델: UNet, DeepLabV3+, CDNetV1, CDNetV2
+지원 모델: UNet, DeepLabV3+, CDNetV1, CDNetV2, VisionMamba, ViT
 """
 
+from .vit_seg import ViTSeg, vit_seg_nano, vit_seg_small
+from .vim_seg import VimSeg, vim_seg_tiny, vim_seg_small, vim_seg_base, EDLLoss, edl_uncertainty
 import torch.nn as nn
 
 from .utils import IntermediateLayerGetter
@@ -15,15 +17,11 @@ from .cdnetv1 import CDnetV1
 from .cdnetv2 import CDnetV2
 from .hrcloudnet import HRcloudNet
 
-# VisionMamba models (optional - requires mamba_ssm)
-import warnings as _warnings
-
-VIM_AVAILABLE = False
-VIM_IMPORT_ERROR = None
-VimSeg = None
-
-from .vim_seg import VimSeg, vim_seg_tiny, vim_seg_small, vim_seg_base, EDLLoss, edl_uncertainty
+# VisionMamba models
 VIM_AVAILABLE = True
+VIM_IMPORT_ERROR = None
+
+# ViT models
 
 
 def _adapt_resnet_input(backbone, in_channels, pretrained):
@@ -317,6 +315,9 @@ MODELS = {
     'vim_tiny': vim_tiny,
     'vim_small': vim_small,
     'vim_base': vim_base,
+    # ViT models
+    'vit_nano': vit_seg_nano,
+    'vit_small': vit_seg_small,
 }
 
 
@@ -379,6 +380,15 @@ def get_model(model_name, in_channels=3, num_classes=21, pretrained_backbone=Tru
             decoder_type=decoder_type,
             head_type=head_type,
             **{k: v for k, v in kwargs.items() if k not in ['decoder_type', 'head_type']}
+        )
+
+    # ViT의 경우 decoder_type 인자만 전달
+    if model_name.startswith('vit_'):
+        decoder_type = kwargs.get('decoder_type', 'unet')
+        return model_fn(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            decoder_type=decoder_type,
         )
 
     return model_fn(

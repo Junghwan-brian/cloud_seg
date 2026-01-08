@@ -30,12 +30,71 @@ L1C (Level-1C) 및 L2A (Level-2A) 데이터 모두 지원
 import glob
 from pathlib import Path
 from typing import Optional, List, Tuple, Callable, Union, Literal
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 import rasterio as rio
 import tacoreader
 import torch
 from torch.utils.data import Dataset
+from tqdm import tqdm
+
+
+# =============================================================================
+# 파일 핸들 캐싱을 위한 유틸리티
+# =============================================================================
+
+class RasterioFileCache:
+    """
+    Rasterio 파일 핸들을 캐싱하여 반복적인 파일 열기/닫기 오버헤드를 줄입니다.
+    """
+
+    def __init__(self, max_size: int = 128):
+        self.max_size = max_size
+        self._cache = {}
+        self._access_order = []
+
+    def get(self, path: str):
+        """캐시된 파일 핸들을 반환하거나 새로 엽니다."""
+        if path in self._cache:
+            # LRU 업데이트
+            self._access_order.remove(path)
+            self._access_order.append(path)
+            return self._cache[path]
+
+        # 캐시가 꽉 차면 가장 오래된 항목 제거
+        if len(self._cache) >= self.max_size:
+            oldest = self._access_order.pop(0)
+            self._cache[oldest].close()
+            del self._cache[oldest]
+
+        # 새 파일 열기
+        src = rio.open(path)
+        self._cache[path] = src
+        self._access_order.append(path)
+        return src
+
+    def close_all(self):
+        """모든 캐시된 파일 핸들을 닫습니다."""
+        for src in self._cache.values():
+            src.close()
+        self._cache.clear()
+        self._access_order.clear()
+
+    def __del__(self):
+        self.close_all()
+
+
+# 전역 파일 캐시 (프로세스별)
+_cloudsen12_file_cache = None
+
+
+def _get_file_cache() -> RasterioFileCache:
+    """전역 파일 캐시를 반환합니다."""
+    global _cloudsen12_file_cache
+    if _cloudsen12_file_cache is None:
+        _cloudsen12_file_cache = RasterioFileCache(max_size=256)
+    return _cloudsen12_file_cache
 
 
 # 기본 TACO 디렉토리 경로
@@ -124,6 +183,8 @@ class CloudSEN12Dataset(Dataset):
         return_metadata: bool = False,
         patch_size: Optional[int] = 512,
         random_crop: bool = True,
+        use_cache: bool = True,
+        preload: bool = False,
     ):
         """
         Args:
@@ -137,6 +198,8 @@ class CloudSEN12Dataset(Dataset):
             return_metadata: True면 메타데이터도 함께 반환
             patch_size: 출력 패치 크기. None이면 원본 크기 유지 (배치 사용 시 주의)
             random_crop: True면 랜덤 crop, False면 center crop (validation/test용)
+            use_cache: True면 파일 핸들 캐싱 사용 (권장)
+            preload: True면 모든 데이터를 메모리에 미리 로드 (빠른 학습, 메모리 사용 증가)
         """
         self.level = level.lower()
         if self.level not in ['l1c', 'l2a']:
@@ -156,6 +219,9 @@ class CloudSEN12Dataset(Dataset):
         self.patch_size = patch_size
         # validation/test는 center crop, train은 random crop
         self.random_crop = random_crop if split == 'train' else False
+        self.use_cache = use_cache
+        self.preload = preload
+        self._preloaded_data = None
 
         # TACO 파일 로드
         taco_files = sorted(glob.glob(str(self.taco_dir / '*.taco')))
@@ -185,7 +251,79 @@ class CloudSEN12Dataset(Dataset):
                 storage_options=self.full_dataset._storage_options
             )
 
+        # 파일 경로 캐싱 (tacoreader 호출 오버헤드 제거)
+        print(f"Caching file paths for {len(self.dataset)} samples...")
+        self._cached_paths = self._cache_all_paths()
+        
         print(f"Dataset loaded: {len(self.dataset)} samples ({split})")
+        
+        # 데이터 프리로드
+        if preload:
+            self._preload_all_data()
+    
+    def _cache_all_paths(self) -> List[Tuple[str, str]]:
+        """모든 샘플의 이미지/레이블 경로를 캐싱합니다."""
+        cached_paths = []
+        for idx in range(len(self.dataset)):
+            sample = self.dataset.read(idx)
+            image_path = sample.read(0)
+            label_path = sample.read(1)
+            cached_paths.append((image_path, label_path))
+        return cached_paths
+    
+    def _load_single_sample(self, idx: int) -> dict:
+        """단일 샘플을 로드합니다 (병렬 로딩용)."""
+        image_path, label_path = self._cached_paths[idx]
+        sample_row = self.dataset.iloc[idx]
+        
+        with rio.open(image_path) as src:
+            if self.bands is not None:
+                image = src.read(self.bands)
+            else:
+                image = src.read()
+        
+        with rio.open(label_path) as src:
+            label = src.read(1)
+        
+        image = image.astype(np.float32)
+        label = label.astype(np.int64)
+        
+        # 유효하지 않은 라벨 값을 ignore_index (255)로 매핑
+        invalid_mask = (label < 0) | (label > 3)
+        label[invalid_mask] = 255
+        
+        return {
+            'image': image,
+            'label': label,
+            'metadata': {
+                'roi_id': sample_row.get('roi_id', None),
+                's2_id': sample_row.get('s2_id', None),
+                'data_split': sample_row.get('tortilla:data_split', None),
+            }
+        }
+    
+    def _preload_all_data(self):
+        """모든 데이터를 메모리에 병렬로 미리 로드합니다."""
+        print(f"Preloading {len(self.dataset)} samples to memory (parallel)...")
+        
+        self._preloaded_data = [None] * len(self.dataset)
+        num_threads = min(16, len(self.dataset))
+        
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = {
+                executor.submit(self._load_single_sample, idx): idx
+                for idx in range(len(self.dataset))
+            }
+            
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Preloading"):
+                idx = futures[future]
+                self._preloaded_data[idx] = future.result()
+        
+        # 메모리 사용량 계산
+        sample = self._preloaded_data[0]
+        bytes_per_sample = sample['image'].nbytes + sample['label'].nbytes
+        total_gb = len(self._preloaded_data) * bytes_per_sample / 1e9
+        print(f"Preloading complete. Memory usage: ~{total_gb:.2f} GB")
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -253,34 +391,55 @@ class CloudSEN12Dataset(Dataset):
             label: (H, W) 형태의 레이블 텐서
             metadata: (optional) 메타데이터 딕셔너리
         """
-        # 샘플 메타데이터 가져오기
-        sample_row = self.dataset.iloc[idx]
-
-        # 이미지와 레이블 경로 가져오기
-        sample = self.dataset.read(idx)
-        image_path = sample.read(0)
-        label_path = sample.read(1)
-
-        # 이미지 읽기
-        with rio.open(image_path) as src:
-            if self.bands is not None:
-                image = src.read(self.bands)  # bands는 1-indexed
+        # 프리로드된 데이터 사용
+        if self._preloaded_data is not None:
+            data = self._preloaded_data[idx]
+            image = data['image'].copy()
+            label = data['label'].copy()
+            metadata_base = data['metadata']
+        else:
+            # 캐싱된 경로 사용 (tacoreader 호출 오버헤드 제거)
+            image_path, label_path = self._cached_paths[idx]
+            sample_row = self.dataset.iloc[idx]
+            
+            # 파일 핸들 캐싱 사용
+            if self.use_cache:
+                cache = _get_file_cache()
+                img_src = cache.get(image_path)
+                label_src = cache.get(label_path)
+                
+                if self.bands is not None:
+                    image = img_src.read(self.bands)
+                else:
+                    image = img_src.read()
+                label = label_src.read(1)
             else:
-                image = src.read()  # 모든 밴드 읽기
+                # 이미지 읽기
+                with rio.open(image_path) as src:
+                    if self.bands is not None:
+                        image = src.read(self.bands)  # bands는 1-indexed
+                    else:
+                        image = src.read()  # 모든 밴드 읽기
 
-        # 레이블 읽기
-        with rio.open(label_path) as src:
-            label = src.read(1)  # 단일 채널
+                # 레이블 읽기
+                with rio.open(label_path) as src:
+                    label = src.read(1)  # 단일 채널
 
-        # 데이터 타입 변환
-        image = image.astype(np.float32)
-        label = label.astype(np.int64)
-        
-        # 유효하지 않은 라벨 값을 ignore_index (255)로 매핑
-        # 유효한 값: 0 (clear), 1 (thick cloud), 2 (thin cloud), 3 (cloud shadow)
-        # 유효하지 않은 값: 4, 5, 6, 99 등 -> 255
-        invalid_mask = (label < 0) | (label > 3)
-        label[invalid_mask] = 255
+            # 데이터 타입 변환
+            image = image.astype(np.float32)
+            label = label.astype(np.int64)
+            
+            # 유효하지 않은 라벨 값을 ignore_index (255)로 매핑
+            # 유효한 값: 0 (clear), 1 (thick cloud), 2 (thin cloud), 3 (cloud shadow)
+            # 유효하지 않은 값: 4, 5, 6, 99 등 -> 255
+            invalid_mask = (label < 0) | (label > 3)
+            label[invalid_mask] = 255
+            
+            metadata_base = {
+                'roi_id': sample_row.get('roi_id', None),
+                's2_id': sample_row.get('s2_id', None),
+                'data_split': sample_row.get('tortilla:data_split', None),
+            }
 
         # 패치 크기에 맞게 crop
         if self.patch_size is not None:
@@ -304,10 +463,9 @@ class CloudSEN12Dataset(Dataset):
             label = torch.from_numpy(label)
 
         if self.return_metadata:
+            sample_row = self.dataset.iloc[idx]
             metadata = {
-                'roi_id': sample_row.get('roi_id', None),
-                's2_id': sample_row.get('s2_id', None),
-                'data_split': sample_row.get('tortilla:data_split', None),
+                **metadata_base,
                 'thick_percentage': sample_row.get('thick_percentage', None),
                 'thin_percentage': sample_row.get('thin_percentage', None),
                 'cloud_shadow_percentage': sample_row.get('cloud_shadow_percentage', None),

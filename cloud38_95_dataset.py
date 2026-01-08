@@ -52,21 +52,42 @@ from tqdm import tqdm
 # 이미지 캐싱을 위한 유틸리티 함수들
 # =============================================================================
 
-@lru_cache(maxsize=2048)
+@lru_cache(maxsize=4096)
 def _cached_load_image(path: str) -> np.ndarray:
     """
     LRU 캐시를 사용하여 이미지를 로드합니다.
-    캐시 크기: 2048개 (약 4GB 메모리 사용, 384x384 float32 기준)
+    캐시 크기: 4096개 (더 많은 샘플 캐싱)
     """
     return np.array(Image.open(path), dtype=np.float32)
 
 
-@lru_cache(maxsize=2048)
+@lru_cache(maxsize=4096)
 def _cached_load_mask(path: str) -> np.ndarray:
     """
     LRU 캐시를 사용하여 마스크를 로드합니다.
     """
     return np.array(Image.open(path), dtype=np.int64)
+
+
+def _load_bands_parallel(band_paths: tuple) -> np.ndarray:
+    """
+    여러 밴드 이미지를 병렬로 로드합니다.
+    
+    Args:
+        band_paths: 밴드 경로들의 튜플 (hashable for caching)
+    
+    Returns:
+        stacked image array (C, H, W)
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    
+    def load_single(path):
+        return np.array(Image.open(path), dtype=np.float32)
+    
+    with ThreadPoolExecutor(max_workers=len(band_paths)) as executor:
+        images = list(executor.map(load_single, band_paths))
+    
+    return np.stack(images, axis=0)
 
 
 # 기본 경로
@@ -280,15 +301,14 @@ class Cloud38Dataset(Dataset):
             image = self._preloaded_data[idx]['image'].copy()
             mask = self._preloaded_data[idx]['mask'].copy()
         else:
-            # 캐시된 로딩 함수 사용
-            band_images = []
-            for band in self.bands:
-                band_path = str(self._get_band_path(patch_name, band))
-                img = _cached_load_image(band_path)
-                band_images.append(img)
-
-            # 채널 축으로 스택 (C, H, W)
-            image = np.stack(band_images, axis=0)
+            # 밴드 경로 수집
+            band_paths = tuple(
+                str(self._get_band_path(patch_name, band)) 
+                for band in self.bands
+            )
+            
+            # 병렬 로딩 사용 (4개 밴드를 동시에 로드)
+            image = _load_bands_parallel(band_paths)
 
             # GT 마스크 로드
             if self.has_gt:
@@ -684,14 +704,14 @@ class Cloud95Dataset(Dataset):
             image = self._preloaded_data[idx]['image'].copy()
             mask = self._preloaded_data[idx]['mask'].copy()
         else:
-            # 캐시된 로딩 함수 사용
-            band_images = []
-            for band in self.bands:
-                band_path = str(self._get_band_path(patch_info, band))
-                img = _cached_load_image(band_path)
-                band_images.append(img)
-
-            image = np.stack(band_images, axis=0)
+            # 밴드 경로 수집
+            band_paths = tuple(
+                str(self._get_band_path(patch_info, band)) 
+                for band in self.bands
+            )
+            
+            # 병렬 로딩 사용 (4개 밴드를 동시에 로드)
+            image = _load_bands_parallel(band_paths)
 
             # GT 마스크 로드
             if self._use_38cloud_test:

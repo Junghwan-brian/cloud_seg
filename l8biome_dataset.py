@@ -399,13 +399,21 @@ class L8BiomeDataset(Dataset):
         return len(self.split_scenes)
 
     def _convert_mask(self, mask: np.ndarray) -> np.ndarray:
-        """원본 마스크 값을 클래스 인덱스로 변환합니다."""
-        converted = np.full_like(mask, self.IGNORE_INDEX, dtype=np.int64)
-
-        for orig_val, class_idx in self.MASK_MAPPING.items():
-            converted[mask == orig_val] = class_idx
-
-        return converted
+        """
+        원본 마스크 값을 클래스 인덱스로 변환합니다.
+        
+        벡터화된 룩업 테이블을 사용하여 for 루프 없이 빠르게 변환합니다.
+        """
+        # 룩업 테이블 사용 (0-255 범위의 값을 한 번에 변환)
+        # 기본값은 IGNORE_INDEX (255)
+        lut = np.full(256, self.IGNORE_INDEX, dtype=np.int64)
+        lut[0] = 0      # Clear
+        lut[64] = 1     # Thin Cloud
+        lut[128] = 2    # Cloud
+        lut[192] = 3    # Cloud Shadow
+        lut[255] = 255  # Fill/No Data (ignore)
+        
+        return lut[mask.astype(np.uint8)]
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
