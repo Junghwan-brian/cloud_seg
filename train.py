@@ -38,6 +38,9 @@ from cloud38_95_dataset import Cloud38Dataset, Cloud95Dataset
 # Path utilities
 from utils.paths import get_nas_path, detect_nas_base
 
+# Loss functions
+from utils.losses import get_loss_function, get_class_weights
+
 
 # =============================================================================
 # Dataset Configuration
@@ -615,6 +618,11 @@ def generate_experiment_name(args):
         name_parts.append(f"{args.decoder_type}")
         name_parts.append(f"{args.head_type}")
 
+    # Loss 정보 추가
+    name_parts.append(args.loss_type)
+    if args.use_class_weights:
+        name_parts.append("weighted")
+
     # 타임스탬프 추가
     name_parts.append(timestamp)
 
@@ -813,10 +821,40 @@ def main(args):
         )
         logging.info(
             f"Using EDL Loss (annealing_epochs={args.edl_annealing_epochs}, lambda_kl={args.edl_lambda_kl})")
-    elif ignore_index is not None:
-        criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
     else:
-        criterion = nn.CrossEntropyLoss()
+        # 클래스 가중치 계산
+        class_weights = None
+        if args.use_class_weights:
+            class_weights = get_class_weights(
+                dataset_name=args.dataset,
+                num_classes=num_classes,
+                method=args.class_weight_method,
+            )
+            logging.info(
+                f"Class weights ({args.class_weight_method}): {class_weights.tolist()}")
+
+        # 손실 함수 생성
+        criterion = get_loss_function(
+            loss_type=args.loss_type,
+            num_classes=num_classes,
+            class_weights=class_weights,
+            ignore_index=ignore_index,
+            gamma=args.focal_gamma,
+            ce_weight=args.ce_weight,
+            dice_weight=args.dice_weight,
+            ohem_thresh=args.ohem_thresh,
+            ohem_min_kept=args.ohem_min_kept,
+        )
+
+        logging.info(f"Loss function: {args.loss_type}")
+        if args.loss_type in ['focal', 'focal_dice']:
+            logging.info(f"  - Focal gamma: {args.focal_gamma}")
+        if args.loss_type in ['ce_dice', 'focal_dice']:
+            logging.info(
+                f"  - CE weight: {args.ce_weight}, Dice weight: {args.dice_weight}")
+        if args.loss_type == 'ohem':
+            logging.info(
+                f"  - OHEM thresh: {args.ohem_thresh}, min_kept: {args.ohem_min_kept}")
 
     # Optimizer
     if args.optimizer == 'adam':
@@ -1029,6 +1067,30 @@ def parse_args():
                         help='EDL KL annealing epochs')
     parser.add_argument('--edl_lambda_kl', type=float, default=0.1,
                         help='EDL KL divergence weight')
+
+    # Loss function
+    parser.add_argument('--loss_type', type=str, default='focal_dice',
+                        choices=['ce', 'weighted_ce', 'focal',
+                                 'dice', 'ce_dice', 'focal_dice', 'ohem'],
+                        help='Loss function type. Recommended: focal_dice for class imbalance')
+    parser.add_argument('--use_class_weights', action='store_true', default=True,
+                        help='Use class weights for loss function')
+    parser.add_argument('--no_class_weights', dest='use_class_weights', action='store_false',
+                        help='Do not use class weights')
+    parser.add_argument('--class_weight_method', type=str, default='manual',
+                        choices=['manual', 'inverse_freq',
+                                 'sqrt_inverse_freq', 'effective_num'],
+                        help='Method to compute class weights')
+    parser.add_argument('--focal_gamma', type=float, default=2.0,
+                        help='Focal loss gamma (focusing parameter)')
+    parser.add_argument('--ce_weight', type=float, default=1.0,
+                        help='CrossEntropy weight in combined loss')
+    parser.add_argument('--dice_weight', type=float, default=1.0,
+                        help='Dice weight in combined loss')
+    parser.add_argument('--ohem_thresh', type=float, default=0.7,
+                        help='OHEM hard example threshold')
+    parser.add_argument('--ohem_min_kept', type=int, default=100000,
+                        help='OHEM minimum pixels to keep')
 
     # Training
     parser.add_argument('--epochs', type=int, default=10,

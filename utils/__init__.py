@@ -16,7 +16,18 @@ from .paths import (
     PRETRAINED_PATHS,
 )
 
+from .losses import (
+    FocalLoss,
+    DiceLoss,
+    CombinedLoss,
+    OHEMLoss,
+    ClassBalancedLoss,
+    get_class_weights,
+    get_loss_function,
+)
+
 __all__ = [
+    # paths
     'detect_nas_base',
     'get_nas_path',
     'resolve_path',
@@ -28,5 +39,13 @@ __all__ = [
     'NAS_BASE_PATHS',
     'DATASET_PATHS',
     'PRETRAINED_PATHS',
+    # losses
+    'FocalLoss',
+    'DiceLoss',
+    'CombinedLoss',
+    'OHEMLoss',
+    'ClassBalancedLoss',
+    'get_class_weights',
+    'get_loss_function',
 ]
 
