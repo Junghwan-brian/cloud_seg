@@ -360,13 +360,20 @@ def compute_metrics(pred, target, num_classes, ignore_index=None):
 
 def train_one_epoch(model, train_loader, criterion, optimizer, device,
                     scaler=None, num_classes=4, ignore_index=None, aux_weight=0.4,
-                    epoch=0, total_epochs=100, is_edl=False):
-    """한 에폭 학습"""
+                    epoch=0, total_epochs=100, is_edl=False,
+                    grad_clip=1.0, grad_clip_type='norm'):
+    """한 에폭 학습
+    
+    Args:
+        grad_clip: Gradient clipping max norm/value (0 to disable)
+        grad_clip_type: 'norm' (L2 norm) or 'value' (absolute value)
+    """
     model.train()
 
     loss_meter = AverageMeter()
     iou_meter = AverageMeter()
     acc_meter = AverageMeter()
+    nan_count = 0  # NaN loss 발생 횟수 추적
 
     pbar = tqdm(train_loader, desc='Training')
 
@@ -411,7 +418,23 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device,
                     loss = criterion(outputs, targets)
                     pred = outputs.argmax(1)
 
+            # NaN loss 체크 및 스킵
+            if torch.isnan(loss) or torch.isinf(loss):
+                nan_count += 1
+                if nan_count <= 3:
+                    logging.warning(f"NaN/Inf loss detected (count: {nan_count}), skipping batch")
+                continue
+
             scaler.scale(loss).backward()
+            
+            # Gradient clipping (AMP 사용 시 unscale 후 적용)
+            if grad_clip > 0:
+                scaler.unscale_(optimizer)
+                if grad_clip_type == 'norm':
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                else:
+                    torch.nn.utils.clip_grad_value_(model.parameters(), grad_clip)
+            
             scaler.step(optimizer)
             scaler.update()
         else:
@@ -447,7 +470,22 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device,
                 loss = criterion(outputs, targets)
                 pred = outputs.argmax(1)
 
+            # NaN loss 체크 및 스킵
+            if torch.isnan(loss) or torch.isinf(loss):
+                nan_count += 1
+                if nan_count <= 3:
+                    logging.warning(f"NaN/Inf loss detected (count: {nan_count}), skipping batch")
+                continue
+
             loss.backward()
+            
+            # Gradient clipping
+            if grad_clip > 0:
+                if grad_clip_type == 'norm':
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                else:
+                    torch.nn.utils.clip_grad_value_(model.parameters(), grad_clip)
+            
             optimizer.step()
 
         # Metrics
@@ -465,10 +503,15 @@ def train_one_epoch(model, train_loader, criterion, optimizer, device,
             'acc': f'{acc_meter.avg:.4f}'
         })
 
+    # NaN 발생 경고 로깅
+    if nan_count > 0:
+        logging.warning(f"Total NaN/Inf losses in this epoch: {nan_count}")
+
     return {
         'loss': loss_meter.avg,
         'mean_iou': iou_meter.avg,
         'accuracy': acc_meter.avg,
+        'nan_count': nan_count,
     }
 
 
@@ -754,6 +797,7 @@ def main(args):
     logging.info(f"  - Weight decay: {args.weight_decay}")
     logging.info(f"  - Epochs: {args.epochs}")
     logging.info(f"  - Patch size: {args.patch_size}")
+    logging.info(f"  - Gradient clip: {args.grad_clip} ({args.grad_clip_type})")
     if args.model.startswith('vim_'):
         logging.info(f"  - Decoder type: {args.decoder_type}")
         logging.info(f"  - Head type: {args.head_type}")
@@ -900,6 +944,7 @@ def main(args):
             scaler=scaler, num_classes=num_classes, ignore_index=ignore_index,
             aux_weight=args.aux_weight,
             epoch=epoch, total_epochs=args.epochs, is_edl=is_edl,
+            grad_clip=args.grad_clip, grad_clip_type=args.grad_clip_type,
         )
 
         # Validate
@@ -1067,6 +1112,13 @@ def parse_args():
                         help='EDL KL annealing epochs')
     parser.add_argument('--edl_lambda_kl', type=float, default=0.1,
                         help='EDL KL divergence weight')
+
+    # Gradient clipping (NaN 방지)
+    parser.add_argument('--grad_clip', type=float, default=1.0,
+                        help='Gradient clipping max norm (0 to disable)')
+    parser.add_argument('--grad_clip_type', type=str, default='norm',
+                        choices=['norm', 'value'],
+                        help='Gradient clipping type: norm (L2) or value')
 
     # Loss function
     parser.add_argument('--loss_type', type=str, default='focal_dice',

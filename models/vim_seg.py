@@ -46,8 +46,11 @@ except ImportError as e:
 try:
     from .mamba_ssm.ops.triton.layer_norm import RMSNorm as _RMSNorm, layer_norm_fn as _layer_norm_fn, rms_norm_fn as _rms_norm_fn
     RMSNorm, layer_norm_fn, rms_norm_fn = _RMSNorm, _layer_norm_fn, _rms_norm_fn
-except ImportError:
+except (ImportError, RuntimeError) as e:
     # Use LayerNorm as fallback - this is expected behavior
+    # RuntimeError can occur when Triton cannot find active GPU drivers
+    warnings.warn(
+        f"[VimSeg] Triton layer_norm not available: {e}. Using PyTorch LayerNorm as fallback.")
     RMSNorm = nn.LayerNorm
     layer_norm_fn, rms_norm_fn = None, None
 

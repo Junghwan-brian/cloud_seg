@@ -34,80 +34,171 @@ from typing import Dict, List, Any, Optional
 # =============================================================================
 
 # 각 모델별 탐색할 하이퍼파라미터 설정
+# NaN 방지를 위해 낮은 learning rate와 gradient clipping 적용
+# Class imbalance 해결을 위해 focal_dice loss와 적절한 가중치 사용
 MODEL_HYPERPARAMS = {
     'unet': {
-        'lr': [5e-4],
+        'lr': [1e-4],  # 5e-4 → 1e-4로 낮춤 (NaN 방지)
         'batch_size': [8],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
+        # Loss 설정 (class imbalance 대응)
+        'loss_type': ['focal_dice'],
+        'focal_gamma': [2.0],
+        'dice_weight': [1.5],  # Dice loss 가중치 증가 (소수 클래스 개선)
+        # Gradient clipping
+        'grad_clip': [1.0],
     },
     'deeplabv3plus': {
-        'lr': [5e-4],
+        'lr': [1e-4],
         'batch_size': [8],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
         'output_stride': [16],
+        'loss_type': ['focal_dice'],
+        'focal_gamma': [2.0],
+        'dice_weight': [1.5],
+        'grad_clip': [1.0],
     },
     'cdnetv1': {
-        'lr': [5e-4],
+        'lr': [1e-4],
         'batch_size': [8],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
+        'loss_type': ['focal_dice'],
+        'focal_gamma': [2.0],
+        'dice_weight': [1.5],
+        'grad_clip': [1.0],
     },
     'cdnetv2': {
-        'lr': [5e-4],
+        'lr': [1e-4],
         'batch_size': [8],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
-        'aux_weight': [0.2],
+        'aux_weight': [0.4],  # auxiliary loss 가중치
+        'loss_type': ['focal_dice'],
+        'focal_gamma': [2.0],
+        'dice_weight': [1.5],
+        'grad_clip': [1.0],
     },
     'hrcloudnet': {
-        'lr': [5e-4],
-        'batch_size': [8],  # HRCloudNet은 메모리 사용량이 큼
+        'lr': [5e-5],  # HRCloudNet은 더 낮은 lr 권장
+        'batch_size': [4],  # 메모리 사용량이 큼
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
         'weight_decay': [1e-4],
+        'loss_type': ['focal_dice'],
+        'focal_gamma': [2.0],
+        'dice_weight': [1.5],
+        'grad_clip': [1.0],
     },
     'vim_tiny': {
-        'lr': [1e-4],
-        'batch_size': [4],
+        'lr': [5e-5],  # ViM 모델은 더 낮은 lr 필요
+        'batch_size': [8],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
-        'weight_decay': [1e-4],
-        'decoder_type': ['unet', 'deeplab'],
-        'head_type': ['standard', 'edl'],
+        'weight_decay': [5e-5],  # 가중치 감쇠 줄임
+        'decoder_type': ['unet'],
+        'head_type': ['edl'],
+        'loss_type': ['focal_dice'],
+        'focal_gamma': [2.0],
+        'dice_weight': [1.5],
+        'grad_clip': [0.5],  # ViM은 더 강한 clipping
     },
     'vim_small': {
-        'lr': [1e-4],
-        'batch_size': [4],
+        'lr': [5e-5],
+        'batch_size': [8],
         'optimizer': ['adamw'],
         'scheduler': ['cosine'],
-        'weight_decay': [1e-4],
-        'decoder_type': ['unet', 'deeplab'],
-        'head_type': ['standard', 'edl'],
+        'weight_decay': [5e-5],
+        'decoder_type': ['unet'],
+        'head_type': ['edl'],
+        'loss_type': ['focal_dice'],
+        'focal_gamma': [2.0],
+        'dice_weight': [1.5],
+        'grad_clip': [0.5],
     },
     # 'vim_base': {
-    #     'lr': [1e-4],
-    #     'batch_size': [4],  # vim_base는 메모리 사용량이 매우 큼
+    #     'lr': [5e-5],
+    #     'batch_size': [2],  # vim_base는 메모리 사용량이 매우 큼
     #     'optimizer': ['adamw'],
     #     'scheduler': ['cosine'],
-    #     'weight_decay': [1e-4],
-    #     'decoder_type': ['unet', 'deeplab'],
-    #     'head_type': ['standard', 'edl'],
+    #     'weight_decay': [5e-5],
+    #     'decoder_type': ['unet'],
+    #     'head_type': ['standard'],
+    #     'loss_type': ['focal_dice'],
+    #     'focal_gamma': [2.0],
+    #     'dice_weight': [1.5],
+    #     'grad_clip': [0.5],
     # },
 }
 
-# 데이터셋별 기본 설정
+# 데이터셋별 기본 설정 및 class imbalance 대응 설정
 DATASET_DEFAULTS = {
-    'l8biome': {'epochs': 5, 'patch_size': 512},
-    'cloudsen12_l1c': {'epochs': 3, 'patch_size': 512},
-    'cloudsen12_l2a': {'epochs': 3, 'patch_size': 512},
-    'cloud38': {'epochs': 10, 'patch_size': 384},
-    'cloud95': {'epochs': 5, 'patch_size': 384},
+    'l8biome': {
+        'epochs': 30,
+        'patch_size': 512,
+        # L8Biome은 4클래스 (clear, thin_cloud, cloud, cloud_shadow)
+        # thin_cloud와 cloud_shadow가 소수 클래스
+        'class_weight_method': 'manual',
+        'use_class_weights': True,
+    },
+    'cloudsen12_l1c': {
+        'epochs': 20,
+        'patch_size': 512,
+        # CloudSEN12는 4클래스 (clear, thick_cloud, thin_cloud, cloud_shadow)
+        'class_weight_method': 'manual',
+        'use_class_weights': True,
+    },
+    'cloudsen12_l2a': {
+        'epochs': 20,
+        'patch_size': 512,
+        'class_weight_method': 'manual',
+        'use_class_weights': True,
+    },
+    'cloud38': {
+        'epochs': 50,
+        'patch_size': 384,
+        # Cloud38/95는 2클래스 (clear, cloud) - 상대적으로 균형
+        'class_weight_method': 'manual',
+        'use_class_weights': True,
+    },
+    'cloud95': {
+        'epochs': 30,
+        'patch_size': 384,
+        'class_weight_method': 'manual',
+        'use_class_weights': True,
+    },
+}
+
+# 데이터셋-모델 조합별 특수 설정 (문제가 있는 조합에 대한 튜닝)
+SPECIAL_CONFIGS = {
+    # L8Biome + HRCloudNet: 메모리 문제로 batch size 줄임
+    ('l8biome', 'hrcloudnet'): {
+        'batch_size': 2,
+        'lr': 5e-5,
+    },
+    # CloudSEN12 + ViM: 더 낮은 lr 필요
+    ('cloudsen12_l1c', 'vim_tiny'): {
+        'lr': 3e-5,
+        'grad_clip': 0.3,
+    },
+    ('cloudsen12_l1c', 'vim_small'): {
+        'lr': 3e-5,
+        'grad_clip': 0.3,
+    },
+    ('cloudsen12_l2a', 'vim_tiny'): {
+        'lr': 3e-5,
+        'grad_clip': 0.3,
+    },
+    ('cloudsen12_l2a', 'vim_small'): {
+        'lr': 3e-5,
+        'grad_clip': 0.3,
+    },
 }
 
 # =============================================================================
@@ -178,16 +269,35 @@ def generate_experiment_configs(
     """
     # 기본 하이퍼파라미터 설정 가져오기
     if hyperparams is None:
-        hyperparams = MODEL_HYPERPARAMS.get(model, MODEL_HYPERPARAMS['unet'])
+        hyperparams = MODEL_HYPERPARAMS.get(
+            model, MODEL_HYPERPARAMS['unet']).copy()
 
     # 데이터셋 기본값
     dataset_defaults = DATASET_DEFAULTS.get(
         dataset, {'epochs': 10, 'patch_size': 512})
 
     if epochs is None:
-        epochs = dataset_defaults['epochs']
+        epochs = dataset_defaults.get('epochs', 10)
     if patch_size is None:
-        patch_size = dataset_defaults['patch_size']
+        patch_size = dataset_defaults.get('patch_size', 512)
+
+    # 데이터셋별 추가 설정 (class weights 등)
+    dataset_extra = {}
+    for key in ['class_weight_method', 'use_class_weights']:
+        if key in dataset_defaults:
+            dataset_extra[key] = dataset_defaults[key]
+
+    # 특수 조합 설정 적용 (문제가 있는 모델-데이터셋 조합)
+    special_key = (dataset, model)
+    if special_key in SPECIAL_CONFIGS:
+        special = SPECIAL_CONFIGS[special_key]
+        for key, value in special.items():
+            # 리스트로 변환 (하이퍼파라미터 탐색 형식에 맞춤)
+            if not isinstance(value, list):
+                value = [value]
+            hyperparams[key] = value
+        print(
+            f"[Info] Applied special config for {dataset} + {model}: {special}")
 
     # 모든 조합 생성
     keys = list(hyperparams.keys())
@@ -200,6 +310,8 @@ def generate_experiment_configs(
         config['dataset'] = dataset
         config['epochs'] = epochs
         config['patch_size'] = patch_size
+        # 데이터셋별 추가 설정 적용
+        config.update(dataset_extra)
         configs.append(config)
 
     return configs
@@ -252,13 +364,30 @@ def run_single_experiment(args):
         cmd.extend(['--num_workers', str(data_loading_opts['num_workers'])])
 
     # 하이퍼파라미터 추가
-    hp_keys = ['lr', 'batch_size', 'optimizer', 'scheduler', 'weight_decay',
-               'output_stride', 'aux_weight', 'decoder_type', 'head_type',
-               'edl_annealing_epochs', 'edl_lambda_kl']
+    hp_keys = [
+        # 기본 학습 파라미터
+        'lr', 'batch_size', 'optimizer', 'scheduler', 'weight_decay',
+        # 모델별 파라미터
+        'output_stride', 'aux_weight', 'decoder_type', 'head_type',
+        'edl_annealing_epochs', 'edl_lambda_kl',
+        # Loss 관련 파라미터 (class imbalance 대응)
+        'loss_type', 'focal_gamma', 'ce_weight', 'dice_weight',
+        'ohem_thresh', 'ohem_min_kept',
+        # Class weights 관련
+        'class_weight_method',
+        # Gradient clipping (NaN 방지)
+        'grad_clip', 'grad_clip_type',
+    ]
 
     for key in hp_keys:
         if key in config:
             cmd.extend([f'--{key}', str(config[key])])
+
+    # Boolean 플래그 처리
+    if config.get('use_class_weights', True):
+        cmd.append('--use_class_weights')
+    else:
+        cmd.append('--no_class_weights')
 
     # 로그 파일 설정
     log_file = output_base / f"{exp_name}_gpu{gpu_id}.log"
@@ -449,6 +578,25 @@ Examples:
     parser.add_argument('--patch_size', type=int, default=None,
                         help='Patch size')
 
+    # Loss 관련 설정 (class imbalance 대응)
+    parser.add_argument('--loss_type', type=str, nargs='+', default=None,
+                        choices=['ce', 'weighted_ce', 'focal', 'dice',
+                                 'ce_dice', 'focal_dice', 'ohem'],
+                        help='Loss function types to try')
+    parser.add_argument('--focal_gamma', type=float, nargs='+', default=None,
+                        help='Focal loss gamma values to try')
+    parser.add_argument('--dice_weight', type=float, nargs='+', default=None,
+                        help='Dice loss weight values to try')
+    parser.add_argument('--use_class_weights', action='store_true', default=True,
+                        help='Use class weights for loss function')
+    parser.add_argument('--no_class_weights', dest='use_class_weights',
+                        action='store_false',
+                        help='Do not use class weights')
+
+    # Gradient clipping (NaN 방지)
+    parser.add_argument('--grad_clip', type=float, nargs='+', default=None,
+                        help='Gradient clipping max norm values to try')
+
     # 출력 설정
     parser.add_argument('--output_dir', type=str, default='./experiment_outputs',
                         help='Base output directory for logs, config (local)')
@@ -547,6 +695,18 @@ def main():
                 default_hp['scheduler'] = args.scheduler
             if args.weight_decay is not None:
                 default_hp['weight_decay'] = args.weight_decay
+
+            # Loss 관련 파라미터 오버라이드
+            if args.loss_type is not None:
+                default_hp['loss_type'] = args.loss_type
+            if args.focal_gamma is not None:
+                default_hp['focal_gamma'] = args.focal_gamma
+            if args.dice_weight is not None:
+                default_hp['dice_weight'] = args.dice_weight
+
+            # Gradient clipping 오버라이드
+            if args.grad_clip is not None:
+                default_hp['grad_clip'] = args.grad_clip
 
             # 빠른 테스트 모드
             if args.quick:

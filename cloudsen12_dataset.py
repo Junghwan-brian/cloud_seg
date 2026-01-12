@@ -254,13 +254,13 @@ class CloudSEN12Dataset(Dataset):
         # 파일 경로 캐싱 (tacoreader 호출 오버헤드 제거)
         print(f"Caching file paths for {len(self.dataset)} samples...")
         self._cached_paths = self._cache_all_paths()
-        
+
         print(f"Dataset loaded: {len(self.dataset)} samples ({split})")
-        
+
         # 데이터 프리로드
         if preload:
             self._preload_all_data()
-    
+
     def _cache_all_paths(self) -> List[Tuple[str, str]]:
         """모든 샘플의 이미지/레이블 경로를 캐싱합니다."""
         cached_paths = []
@@ -270,28 +270,28 @@ class CloudSEN12Dataset(Dataset):
             label_path = sample.read(1)
             cached_paths.append((image_path, label_path))
         return cached_paths
-    
+
     def _load_single_sample(self, idx: int) -> dict:
         """단일 샘플을 로드합니다 (병렬 로딩용)."""
         image_path, label_path = self._cached_paths[idx]
         sample_row = self.dataset.iloc[idx]
-        
+
         with rio.open(image_path) as src:
             if self.bands is not None:
                 image = src.read(self.bands)
             else:
                 image = src.read()
-        
+
         with rio.open(label_path) as src:
             label = src.read(1)
-        
+
         image = image.astype(np.float32)
         label = label.astype(np.int64)
-        
+
         # 유효하지 않은 라벨 값을 ignore_index (255)로 매핑
         invalid_mask = (label < 0) | (label > 3)
         label[invalid_mask] = 255
-        
+
         return {
             'image': image,
             'label': label,
@@ -301,24 +301,25 @@ class CloudSEN12Dataset(Dataset):
                 'data_split': sample_row.get('tortilla:data_split', None),
             }
         }
-    
+
     def _preload_all_data(self):
         """모든 데이터를 메모리에 병렬로 미리 로드합니다."""
-        print(f"Preloading {len(self.dataset)} samples to memory (parallel)...")
-        
+        print(
+            f"Preloading {len(self.dataset)} samples to memory (parallel)...")
+
         self._preloaded_data = [None] * len(self.dataset)
         num_threads = min(16, len(self.dataset))
-        
+
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
             futures = {
                 executor.submit(self._load_single_sample, idx): idx
                 for idx in range(len(self.dataset))
             }
-            
+
             for future in tqdm(as_completed(futures), total=len(futures), desc="Preloading"):
                 idx = futures[future]
                 self._preloaded_data[idx] = future.result()
-        
+
         # 메모리 사용량 계산
         sample = self._preloaded_data[0]
         bytes_per_sample = sample['image'].nbytes + sample['label'].nbytes
@@ -401,13 +402,13 @@ class CloudSEN12Dataset(Dataset):
             # 캐싱된 경로 사용 (tacoreader 호출 오버헤드 제거)
             image_path, label_path = self._cached_paths[idx]
             sample_row = self.dataset.iloc[idx]
-            
+
             # 파일 핸들 캐싱 사용
             if self.use_cache:
                 cache = _get_file_cache()
                 img_src = cache.get(image_path)
                 label_src = cache.get(label_path)
-                
+
                 if self.bands is not None:
                     image = img_src.read(self.bands)
                 else:
@@ -428,13 +429,13 @@ class CloudSEN12Dataset(Dataset):
             # 데이터 타입 변환
             image = image.astype(np.float32)
             label = label.astype(np.int64)
-            
+
             # 유효하지 않은 라벨 값을 ignore_index (255)로 매핑
             # 유효한 값: 0 (clear), 1 (thick cloud), 2 (thin cloud), 3 (cloud shadow)
             # 유효하지 않은 값: 4, 5, 6, 99 등 -> 255
             invalid_mask = (label < 0) | (label > 3)
             label[invalid_mask] = 255
-            
+
             metadata_base = {
                 'roi_id': sample_row.get('roi_id', None),
                 's2_id': sample_row.get('s2_id', None),
